@@ -28,6 +28,7 @@
     config.programs = {
       nixfmt.enable = true;
       ruff-check.enable = true;
+      yamlfmt.enable = true;
     };
   };
 

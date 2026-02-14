@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ssl
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Dict, Optional
 
@@ -84,3 +85,63 @@ def _forgejo_create_pr(
 		if isinstance(resp, dict) and k in resp and isinstance(resp[k], str):
 			return resp[k]
 	return api
+
+
+def _forgejo_find_open_pr(
+	repo: ForgejoRepo,
+	*,
+	token: str,
+	auth_scheme: str,
+	base_branch: str,
+	head_branch: str,
+	insecure_tls: bool,
+) -> Optional[str]:
+	api_prefix = repo.api_prefix.strip() or "/api/v1"
+	if not api_prefix.startswith("/"):
+		api_prefix = "/" + api_prefix
+
+	query = urllib.parse.urlencode(
+		{
+			"state": "open",
+			"base": base_branch,
+			"head": f"{repo.owner}:{head_branch}",
+		}
+	)
+	api = repo.base_url.rstrip("/") + api_prefix + f"/repos/{repo.owner}/{repo.repo}/pulls?{query}"
+	resp = _http_json("GET", api, token=token, auth_scheme=auth_scheme, insecure_tls=insecure_tls)
+	if not isinstance(resp, list):
+		return None
+
+	def _owner_name(h: Dict[str, Any]) -> str:
+		repo_obj = h.get("repo") or {}
+		owner_obj = repo_obj.get("owner") or {}
+		return str(owner_obj.get("login") or owner_obj.get("username") or owner_obj.get("name") or "")
+
+	for pr in resp:
+		if not isinstance(pr, dict):
+			continue
+		if str(pr.get("state") or "").lower() not in ("open", ""):
+			continue
+		head = pr.get("head") or {}
+		base = pr.get("base") or {}
+		head_ref = str(head.get("ref") or head.get("name") or "")
+		base_ref = str(base.get("ref") or base.get("name") or "")
+		head_label = str(head.get("label") or "")
+		head_owner = _owner_name(head)
+
+		if base_ref and base_ref != base_branch:
+			continue
+
+		if head_ref == head_branch:
+			pass
+		elif head_label.endswith(f":{head_branch}"):
+			pass
+		elif head_owner and head_owner == repo.owner and head_ref == head_branch:
+			pass
+		else:
+			continue
+
+		for k in ("html_url", "url"):
+			if k in pr and isinstance(pr[k], str):
+				return pr[k]
+	return None

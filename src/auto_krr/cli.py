@@ -9,7 +9,7 @@ from typing import Dict, List, Tuple
 from ruamel.yaml.comments import CommentedMap
 
 from .env import _env_bool, _env_get, _env_key, _env_path, _env_str
-from .forgejo import _forgejo_create_pr
+from .forgejo import _forgejo_create_pr, _forgejo_find_open_pr
 from .git_utils import (
 	_detect_forgejo_from_remote,
 	_ensure_repo,
@@ -272,8 +272,12 @@ def _maybe_create_pr(
 	*,
 	base_branch: str,
 	head_branch: str,
+	had_changes: bool,
 ) -> int:
 	if not args.pr:
+		return 0
+	if not had_changes:
+		print("PR SKIPPED: no changes written.")
 		return 0
 
 	_git_push_set_upstream(repo_root, args.remote, head_branch)
@@ -314,6 +318,18 @@ def _maybe_create_pr(
 	)
 
 	try:
+		existing = _forgejo_find_open_pr(
+			repo,
+			token=token,
+			auth_scheme=args.forgejo_auth_scheme,
+			base_branch=base_branch,
+			head_branch=head_branch,
+			insecure_tls=args.insecure_tls,
+		)
+		if existing:
+			print(f"PR EXISTS: {existing}")
+			return 0
+
 		pr_url = _forgejo_create_pr(
 			repo,
 			token=token,
@@ -391,19 +407,23 @@ def main() -> int:
 		print(f"\nDRY-RUN: would update {len(changed_files)} file(s), {total_changed_targets} target(s). Use --write or set {_env_key('WRITE')}=1.")
 		return 0
 
-	_write_changes(
+	actually_changed = _write_changes(
 		repo_root,
 		changed_files,
 		stage=args.stage,
 		commit=args.commit,
 		commit_message=args.commit_message,
 	)
+	if not actually_changed and args.pr:
+		print("No changes written; skipping PR.")
+		return 0
 
 	pr_status = _maybe_create_pr(
 		args,
 		repo_root,
 		base_branch=base_branch,
 		head_branch=head_branch,
+		had_changes=bool(actually_changed),
 	)
 	if pr_status != 0:
 		return pr_status
