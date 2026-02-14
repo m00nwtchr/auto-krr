@@ -28,6 +28,10 @@ def _find_krr_comment_targets(doc: Any) -> List[CommentTargetMatch]:
 					controller, container = _parse_krr_comment(texts)
 					if (not controller or not container) and prev_key is not None:
 						controller, container = _parse_krr_comment(_comment_texts_for_key(node, prev_key))
+					if not controller or not container:
+						controller, container = _parse_krr_comment(_comment_texts_for_map(node))
+					if (not controller or not container) and prev_key is not None:
+						controller, container = _parse_krr_comment(_trailing_comment_texts(node.get(prev_key)))
 					if controller and container:
 						matches.append(
 							CommentTargetMatch(
@@ -52,21 +56,59 @@ def _comment_texts_for_key(m: CommentedMap, key: object) -> List[str]:
 	if not items or key not in items:
 		return []
 	entry = items.get(key)
+	return _comment_texts_from_obj(entry)
+
+
+def _comment_texts_for_map(m: CommentedMap) -> List[str]:
+	ca = getattr(m, "ca", None)
+	if not ca:
+		return []
+	comment = getattr(ca, "comment", None)
+	if not comment:
+		return []
+	return _comment_texts_from_obj(comment)
+
+
+def _trailing_comment_texts(node: Any) -> List[str]:
+	if node is None:
+		return []
 	texts: List[str] = []
 
-	def _collect(obj: Any) -> None:
-		if obj is None:
+	ca = getattr(node, "ca", None)
+	if ca:
+		end = getattr(ca, "end", None)
+		if end:
+			for item in end:
+				if item is None:
+					continue
+				texts.extend(_comment_texts_from_obj(item))
+
+	if isinstance(node, CommentedMap) and node:
+		last_key = list(node.keys())[-1]
+		texts.extend(_comment_texts_for_key(node, last_key))
+		texts.extend(_trailing_comment_texts(node.get(last_key)))
+	elif isinstance(node, list) and node:
+		texts.extend(_trailing_comment_texts(node[-1]))
+
+	return texts
+
+
+def _comment_texts_from_obj(obj: Any) -> List[str]:
+	texts: List[str] = []
+
+	def _collect(item: Any) -> None:
+		if item is None:
 			return
-		if isinstance(obj, list):
-			for part in obj:
+		if isinstance(item, list):
+			for part in item:
 				_collect(part)
 			return
-		value = getattr(obj, "value", None)
+		value = getattr(item, "value", None)
 		if value is None:
-			value = str(obj)
+			value = str(item)
 		texts.append(value)
 
-	_collect(entry)
+	_collect(obj)
 	return texts
 
 
