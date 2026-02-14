@@ -3,12 +3,45 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 import urllib.parse
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 
+_GIT_VERBOSE = False
+
+
+def _set_git_verbose(enabled: bool) -> None:
+	global _GIT_VERBOSE
+	_GIT_VERBOSE = bool(enabled)
+
+
+def _mask_git_args(cmd: List[str]) -> List[str]:
+	masked: List[str] = []
+	for arg in cmd:
+		if re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^/]+@.+", arg):
+			scheme, rest = arg.split("://", 1)
+			creds, _, tail = rest.partition("@")
+			masked.append(f"{scheme}://<redacted>@{tail}")
+			continue
+		if "Authorization:" in arg:
+			masked.append("Authorization: <redacted>")
+		elif arg.startswith("http.") and ".extraHeader" in arg:
+			masked.append(arg)
+		else:
+			masked.append(arg)
+	return masked
+
+
+def _git_debug(msg: str) -> None:
+	if _GIT_VERBOSE:
+		print(msg, file=sys.stderr)
+
+
 def _run(cmd: List[str], *, cwd: Path, check: bool = True) -> subprocess.CompletedProcess:
+	if _GIT_VERBOSE:
+		_git_debug(f"+ {cwd}$ {' '.join(_mask_git_args(cmd))}")
 	return subprocess.run(
 		cmd,
 		cwd=str(cwd),
@@ -20,7 +53,14 @@ def _run(cmd: List[str], *, cwd: Path, check: bool = True) -> subprocess.Complet
 
 
 def _run_git(repo_root: Path, args: List[str], *, check: bool = True) -> subprocess.CompletedProcess:
-	return _run(["git", "-C", str(repo_root), "-c", f"safe.directory={repo_root}", *args], cwd=repo_root, check=check)
+	p = _run(["git", "-C", str(repo_root), "-c", f"safe.directory={repo_root}", *args], cwd=repo_root, check=check)
+	if _GIT_VERBOSE:
+		_git_debug(f"exit {p.returncode}")
+		if p.stdout.strip():
+			_git_debug(f"stdout:\n{p.stdout.rstrip()}")
+		if p.stderr.strip():
+			_git_debug(f"stderr:\n{p.stderr.rstrip()}")
+	return p
 
 
 def _git_root(repo: Path) -> Path:
@@ -81,7 +121,13 @@ def _git_clone(repo_url: str, dest: Path, *, depth: Optional[int] = None) -> Non
 	if depth is not None and depth > 0:
 		cmd += ["--depth", str(depth)]
 	cmd += [repo_url, str(dest)]
-	p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+	p = _run(cmd, cwd=dest.parent, check=False)
+	if _GIT_VERBOSE:
+		_git_debug(f"exit {p.returncode}")
+		if p.stdout.strip():
+			_git_debug(f"stdout:\n{p.stdout.rstrip()}")
+		if p.stderr.strip():
+			_git_debug(f"stderr:\n{p.stderr.rstrip()}")
 	if p.returncode != 0:
 		raise RuntimeError(f"git clone failed for {repo_url} -> {dest}\n{p.stderr}")
 

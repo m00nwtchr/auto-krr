@@ -23,6 +23,7 @@ from .git_utils import (
 	_git_push_set_upstream,
 	_remote_url,
 	_run_git,
+	_set_git_verbose,
 )
 from .hr import _hr_ref_from_doc, _infer_namespace_from_path, _is_app_template_hr, _is_helmrelease
 from .krr import _aggregate_krr
@@ -63,6 +64,7 @@ def _parse_args() -> argparse.Namespace:
 	ap.add_argument("--forgejo-auth-scheme", default=None, help=f"Authorization scheme (default 'token') (env: {_env_key('FORGEJO_AUTH_SCHEME')})")
 	ap.add_argument("--insecure-tls", action="store_true", default=None, help=f"Disable TLS verification for Forgejo API (env: {_env_key('INSECURE_TLS')})")
 	ap.add_argument("--allow-dirty", action="store_true", default=None, help=f"Allow running with dirty git tree (env: {_env_key('ALLOW_DIRTY')})")
+	ap.add_argument("--verbose-git", action="store_true", default=None, help=f"Verbose git output (env: {_env_key('GIT_VERBOSE')})")
 	return ap.parse_args()
 
 
@@ -102,6 +104,7 @@ def _resolve_env_args(args: argparse.Namespace) -> argparse.Namespace:
 
 	args.insecure_tls = args.insecure_tls if args.insecure_tls is not None else _env_bool("INSECURE_TLS", False)
 	args.allow_dirty = args.allow_dirty if args.allow_dirty is not None else _env_bool("ALLOW_DIRTY", False)
+	args.verbose_git = args.verbose_git if args.verbose_git is not None else _env_bool("GIT_VERBOSE", False)
 	return args
 
 
@@ -516,6 +519,7 @@ def _maybe_create_pr(
 def main() -> int:
 	args = _parse_args()
 	args = _resolve_env_args(args)
+	_set_git_verbose(args.verbose_git)
 
 	if args.krr_json is None:
 		print(f"ERROR: missing krr.json path. Provide --krr-json or set {_env_key('KRR_JSON')}", file=sys.stderr)
