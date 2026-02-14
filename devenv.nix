@@ -16,8 +16,11 @@
   languages.python = {
     enable = true;
     lsp.package = pkgs.ty;
-    uv.enable = true;
-    uv.sync.enable = true;
+    uv = {
+      enable = true;
+      sync.enable = true;
+    };
+    venv.enable = true;
   };
 
   treefmt = {
