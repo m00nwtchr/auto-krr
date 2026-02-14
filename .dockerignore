@@ -1,0 +1,15 @@
+__pycache__/
+.git/
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+devenv.lock
+devenv.nix
+devenv.yaml
