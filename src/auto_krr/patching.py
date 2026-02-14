@@ -123,6 +123,27 @@ def _apply_to_hr_doc(
 		resources = CommentedMap()
 		_insert_if_missing(ctr_def, "resources", resources, after_keys=["securityContext", "probes", "envFrom", "env", "args", "command", "image"])
 		changed = True
+	resource_changed, resource_notes = _apply_to_resources_map(
+		resources,
+		rec=rec,
+		only_missing=only_missing,
+	)
+	if resource_changed:
+		changed = True
+	if resource_notes:
+		notes.extend(resource_notes)
+
+	return changed, notes
+
+
+def _apply_to_resources_map(
+	resources: CommentedMap,
+	*,
+	rec: RecommendedResources,
+	only_missing: bool,
+) -> Tuple[bool, List[str]]:
+	changed = False
+	notes: List[str] = []
 
 	def _set(section: str, field: str, new_val: str) -> None:
 		nonlocal changed

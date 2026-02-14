@@ -25,10 +25,11 @@ from .git_utils import (
 	_run_git,
 	_set_git_verbose,
 )
+from .comment_targets import _find_krr_comment_targets
 from .hr import _hr_ref_from_doc, _infer_namespace_from_path, _is_app_template_hr, _is_helmrelease
 from .krr import _aggregate_krr
-from .patching import _apply_to_hr_doc
-from .types import ForgejoRepo, HrDocLoc, HrRef, RecommendedResources, TargetKey, YamlDocBundle
+from .patching import _apply_to_hr_doc, _apply_to_resources_map
+from .types import CommentTargetKey, CommentTargetLoc, ForgejoRepo, HrDocLoc, HrRef, RecommendedResources, TargetKey, YamlDocBundle
 from .yaml_utils import _dump_all_yaml_docs, _read_all_yaml_docs
 
 
@@ -187,9 +188,10 @@ def _build_hr_index(
 	chart_name: str,
 	chartref_kind: str,
 	yaml_issues: Dict[str, List[str]],
-) -> Tuple[Dict[HrRef, List[HrDocLoc]], Dict[str, List[HrDocLoc]]]:
+) -> Tuple[Dict[HrRef, List[HrDocLoc]], Dict[str, List[HrDocLoc]], Dict[CommentTargetKey, List[CommentTargetLoc]]]:
 	hr_index: Dict[HrRef, List[HrDocLoc]] = {}
 	hr_index_by_name: Dict[str, List[HrDocLoc]] = {}
+	comment_index: Dict[CommentTargetKey, List[CommentTargetLoc]] = {}
 
 	for fp in yaml_files:
 		try:
@@ -202,6 +204,11 @@ def _build_hr_index(
 			continue
 
 		for i, doc in enumerate(docs):
+			for match in _find_krr_comment_targets(doc):
+				key = CommentTargetKey(controller=match.controller, container=match.container)
+				loc = CommentTargetLoc(path=fp, doc_index=i, resources_path=match.resources_path)
+				comment_index.setdefault(key, []).append(loc)
+
 			if not _is_helmrelease(doc):
 				continue
 			if not _is_app_template_hr(doc, chart_name=chart_name, chartref_kind=chartref_kind):
@@ -221,22 +228,38 @@ def _build_hr_index(
 			hr_index.setdefault(ref, []).append(loc)
 			hr_index_by_name.setdefault(ref.name, []).append(loc)
 
-	return hr_index, hr_index_by_name
+	return hr_index, hr_index_by_name, comment_index
+
+
+def _get_by_path(doc: object, path: List[object]) -> Optional[object]:
+	cur: object = doc
+	for part in path:
+		if isinstance(part, int):
+			if not isinstance(cur, list) or part >= len(cur):
+				return None
+			cur = cur[part]
+		else:
+			if not isinstance(cur, CommentedMap) or part not in cur:
+				return None
+			cur = cur[part]
+	return cur
 
 
 def _apply_krr_to_repo(
 	repo_root: Path,
 	krr_map: Dict[TargetKey, RecommendedResources],
+	comment_map: Dict[CommentTargetKey, RecommendedResources],
 	hr_index: Dict[HrRef, List[HrDocLoc]],
 	hr_index_by_name: Dict[str, List[HrDocLoc]],
+	comment_index: Dict[CommentTargetKey, List[CommentTargetLoc]],
 	*,
 	only_missing: bool,
 	no_name_fallback: bool,
 	yaml_issues: Dict[str, List[str]],
-) -> Tuple[Dict[Path, YamlDocBundle], int, List[TargetKey], Dict[str, List[str]]]:
+) -> Tuple[Dict[Path, YamlDocBundle], int, List[str], Dict[str, List[str]]]:
 	changed_files: Dict[Path, YamlDocBundle] = {}
 	total_changed_targets = 0
-	unmatched: List[TargetKey] = []
+	unmatched: List[str] = []
 	updated: List[str] = []
 	skipped: List[str] = []
 
@@ -266,7 +289,7 @@ def _apply_krr_to_repo(
 				locs = None
 
 		if not locs:
-			unmatched.append(target)
+			unmatched.append(f"{target.hr.namespace}/{target.hr.name} controller={target.controller} container={target.container}")
 			continue
 
 		target_changed = False
@@ -306,18 +329,64 @@ def _apply_krr_to_repo(
 		else:
 			skipped.append(f"{target_id} — no changes needed")
 
+	for target, locs in comment_index.items():
+		rec = comment_map.get(target)
+		target_id = f"comment controller={target.controller} container={target.container}"
+
+		if rec is None:
+			skipped.append(f"{target_id} — no KRR match")
+			continue
+
+		target_changed = False
+		target_notes: List[str] = []
+		for loc in locs:
+			loaded = _ensure_loaded(loc.path)
+			if loaded is None:
+				target_notes.append(f"yaml read failed @ {loc.path.relative_to(repo_root)}")
+				continue
+			raw, docs, yaml = loaded
+			doc = docs[loc.doc_index]
+			if not isinstance(doc, CommentedMap):
+				target_notes.append(f"SKIP: document is not a mapping @ {loc.path.relative_to(repo_root)}")
+				continue
+			resources = _get_by_path(doc, loc.resources_path)
+			if not isinstance(resources, CommentedMap):
+				target_notes.append(f"SKIP: resources is not a mapping @ {loc.path.relative_to(repo_root)}")
+				continue
+
+			changed, notes = _apply_to_resources_map(
+				resources,
+				rec=rec,
+				only_missing=only_missing,
+			)
+
+			if notes:
+				print(f"- {target_id} @ {loc.path.relative_to(repo_root)}")
+				for n in notes:
+					print(f"\t{n}")
+				target_notes.extend(notes)
+
+			if changed:
+				total_changed_targets += 1
+				target_changed = True
+
+		if target_changed:
+			updated.append(target_id)
+		elif target_notes:
+			reason = "; ".join(target_notes)
+			skipped.append(f"{target_id} — {reason}")
+		else:
+			skipped.append(f"{target_id} — no changes needed")
+
 	return changed_files, total_changed_targets, unmatched, {"updated": updated, "skipped": skipped}
 
 
-def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[TargetKey]) -> str:
+def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
 	updated = summary.get("updated", [])
 	skipped = summary.get("skipped", [])
 	yaml_warnings = summary.get("yaml_warnings", [])
 	yaml_errors = summary.get("yaml_errors", [])
-	unmatched_items = [
-		f"{t.hr.namespace}/{t.hr.name} controller={t.controller} container={t.container}"
-		for t in unmatched
-	]
+	unmatched_items = list(unmatched)
 
 	def _section(title: str, items: List[str], *, limit: int = 50) -> List[str]:
 		if not items:
@@ -350,15 +419,12 @@ def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[TargetKey]) -
 	return "\n".join(lines)
 
 
-def _format_cli_summary(summary: Dict[str, List[str]], unmatched: List[TargetKey]) -> str:
+def _format_cli_summary(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
 	updated = summary.get("updated", [])
 	skipped = summary.get("skipped", [])
 	yaml_warnings = summary.get("yaml_warnings", [])
 	yaml_errors = summary.get("yaml_errors", [])
-	unmatched_items = [
-		f"{t.hr.namespace}/{t.hr.name} controller={t.controller} container={t.container}"
-		for t in unmatched
-	]
+	unmatched_items = list(unmatched)
 
 	def _section(title: str, items: List[str], *, limit: int = 50) -> List[str]:
 		if not items:
@@ -533,9 +599,9 @@ def main() -> int:
 		print(f"ERROR: {e}", file=sys.stderr)
 		return 2
 
-	krr_map = _aggregate_krr(args.krr_json, min_severity=args.min_severity)
-	if not krr_map:
-		print("No applicable KRR entries found (after severity filter, or missing Flux labels).", file=sys.stderr)
+	krr_map, comment_map = _aggregate_krr(args.krr_json, min_severity=args.min_severity)
+	if not krr_map and not comment_map:
+		print("No applicable KRR entries found (after severity filter).", file=sys.stderr)
 		return 2
 
 	yaml_files = _git_ls_yaml_files(repo_root)
@@ -545,7 +611,7 @@ def main() -> int:
 
 	yaml_issues: Dict[str, List[str]] = {"warnings": [], "errors": []}
 
-	hr_index, hr_index_by_name = _build_hr_index(
+	hr_index, hr_index_by_name, comment_index = _build_hr_index(
 		repo_root,
 		yaml_files,
 		chart_name=args.chart_name,
@@ -553,15 +619,13 @@ def main() -> int:
 		yaml_issues=yaml_issues,
 	)
 
-	if not hr_index:
-		print("No app-template HelmReleases found in repo (matching chartRef/chart name).", file=sys.stderr)
-		return 2
-
 	changed_files, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
 		repo_root,
 		krr_map,
+		comment_map,
 		hr_index,
 		hr_index_by_name,
+		comment_index,
 		only_missing=args.only_missing,
 		no_name_fallback=args.no_name_fallback,
 		yaml_issues=yaml_issues,
@@ -572,7 +636,7 @@ def main() -> int:
 	if unmatched:
 		print("\nUnmatched KRR targets:", file=sys.stderr)
 		for t in unmatched[:200]:
-			print(f"	- {t.hr.namespace}/{t.hr.name} controller={t.controller} container={t.container}", file=sys.stderr)
+			print(f"	- {t}", file=sys.stderr)
 
 	if total_changed_targets == 0:
 		print("\n" + _format_cli_summary(summary, unmatched))

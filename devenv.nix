@@ -6,11 +6,16 @@
   ...
 }:
 {
-  packages = [
-    pkgs.git
-    pkgs.codex
-    pkgs.ruff
-  ];
+  packages =
+    with pkgs;
+    [
+      git
+      config.outputs.auto-krr
+    ]
+    ++ lib.optionals (!config.container.isBuilding) [
+      ruff
+      codex
+    ];
 
   # https://devenv.sh/languages/
   languages.python = {
@@ -35,5 +40,13 @@
   # https://devenv.sh/git-hooks/
   git-hooks.hooks = {
     treefmt.enable = true;
+  };
+
+  containers."auto-krr" = {
+    entrypoint = [ "${config.outputs.auto-krr}/bin/auto-krr" ];
+  };
+
+  outputs = {
+    auto-krr = config.languages.python.import ./. { };
   };
 }

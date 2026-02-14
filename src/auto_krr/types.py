@@ -21,6 +21,12 @@ class TargetKey:
 	container: str
 
 
+@dataclass(frozen=True)
+class CommentTargetKey:
+	controller: str
+	container: str
+
+
 @dataclass
 class RecommendedResources:
 	req_cpu_cores: Optional[float] = None
@@ -34,6 +40,13 @@ class HrDocLoc:
 	path: Path
 	doc_index: int
 	doc: CommentedMap
+
+
+@dataclass
+class CommentTargetLoc:
+	path: Path
+	doc_index: int
+	resources_path: List[object]
 
 
 @dataclass

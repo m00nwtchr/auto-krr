@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
-from .types import RecommendedResources, TargetKey, HrRef
+from .types import CommentTargetKey, RecommendedResources, TargetKey, HrRef
 
 
 def _safe_float(v: Any) -> Optional[float]:
@@ -54,10 +54,15 @@ def _merge_max(a: Optional[float], b: Optional[float]) -> Optional[float]:
 	return max(a, b)
 
 
-def _aggregate_krr(json_path: Path, *, min_severity: str) -> Dict[TargetKey, RecommendedResources]:
+def _aggregate_krr(
+	json_path: Path,
+	*,
+	min_severity: str,
+) -> Tuple[Dict[TargetKey, RecommendedResources], Dict[CommentTargetKey, RecommendedResources]]:
 	data = json.loads(json_path.read_text(encoding="utf-8"))
 	scans = data.get("scans") or []
-	out: Dict[TargetKey, RecommendedResources] = {}
+	hr_out: Dict[TargetKey, RecommendedResources] = {}
+	comment_out: Dict[CommentTargetKey, RecommendedResources] = {}
 
 	severity_rank = {
 		"UNKNOWN": -1,
@@ -82,8 +87,6 @@ def _aggregate_krr(json_path: Path, *, min_severity: str) -> Dict[TargetKey, Rec
 
 		hr_name = labels.get("helm.toolkit.fluxcd.io/name")
 		hr_ns = labels.get("helm.toolkit.fluxcd.io/namespace")
-		if not hr_name or not hr_ns:
-			continue
 
 		controller = (
 			labels.get("app.kubernetes.io/controller")
@@ -109,19 +112,29 @@ def _aggregate_krr(json_path: Path, *, min_severity: str) -> Dict[TargetKey, Rec
 		):
 			continue
 
-		key = TargetKey(
-			hr=HrRef(namespace=str(hr_ns), name=str(hr_name)),
-			controller=controller,
-			container=container,
-		)
-
-		prev = out.get(key)
+		comment_key = CommentTargetKey(controller=controller, container=container)
+		prev = comment_out.get(comment_key)
 		if prev is None:
-			out[key] = rec
+			comment_out[comment_key] = rec
 		else:
 			prev.req_cpu_cores = _merge_max(prev.req_cpu_cores, rec.req_cpu_cores)
 			prev.req_mem_bytes = _merge_max(prev.req_mem_bytes, rec.req_mem_bytes)
 			prev.lim_cpu_cores = _merge_max(prev.lim_cpu_cores, rec.lim_cpu_cores)
 			prev.lim_mem_bytes = _merge_max(prev.lim_mem_bytes, rec.lim_mem_bytes)
 
-	return out
+		if hr_name and hr_ns:
+			hr_key = TargetKey(
+				hr=HrRef(namespace=str(hr_ns), name=str(hr_name)),
+				controller=controller,
+				container=container,
+			)
+			prev = hr_out.get(hr_key)
+			if prev is None:
+				hr_out[hr_key] = rec
+			else:
+				prev.req_cpu_cores = _merge_max(prev.req_cpu_cores, rec.req_cpu_cores)
+				prev.req_mem_bytes = _merge_max(prev.req_mem_bytes, rec.req_mem_bytes)
+				prev.lim_cpu_cores = _merge_max(prev.lim_cpu_cores, rec.lim_cpu_cores)
+				prev.lim_mem_bytes = _merge_max(prev.lim_mem_bytes, rec.lim_mem_bytes)
+
+	return hr_out, comment_out

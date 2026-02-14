@@ -1,8 +1,30 @@
 inputs:
+  mk-shell-bin:
+    url: github:rrbutani/nix-mk-shell-bin
+  nix2container:
+    url: github:nlewo/nix2container
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
   nixpkgs:
     url: github:cachix/devenv-nixpkgs/rolling
+  pyproject-build-systems:
+    url: github:pyproject-nix/build-system-pkgs
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  pyproject-nix:
+    url: github:pyproject-nix/pyproject.nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
   treefmt-nix:
     url: github:numtide/treefmt-nix
+    inputs:
+      nixpkgs:
+        follows: nixpkgs
+  uv2nix:
+    url: github:pyproject-nix/uv2nix
     inputs:
       nixpkgs:
         follows: nixpkgs

@@ -24,6 +24,11 @@ source .venv/bin/activate
 pip install -e .
 ```
 
+### With uv (recommended)
+```bash
+uv sync --extra dev
+```
+
 ### Run without installing
 ```bash
 python main.py --help
