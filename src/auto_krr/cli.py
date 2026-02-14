@@ -3,8 +3,9 @@ from __future__ import annotations
 import argparse
 import datetime
 import sys
+import warnings
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ruamel.yaml.comments import CommentedMap
 
@@ -12,6 +13,7 @@ from .env import _env_bool, _env_get, _env_key, _env_path, _env_str
 from .forgejo import _forgejo_create_pr, _forgejo_find_open_pr
 from .git_utils import (
 	_detect_forgejo_from_remote,
+	_ensure_git_http_auth,
 	_ensure_git_identity,
 	_ensure_repo,
 	_git_checkout_new,
@@ -103,6 +105,42 @@ def _resolve_env_args(args: argparse.Namespace) -> argparse.Namespace:
 	return args
 
 
+def _fmt_rel_path(repo_root: Path, fp: Path) -> str:
+	try:
+		return str(fp.relative_to(repo_root))
+	except Exception:
+		return str(fp)
+
+
+def _record_yaml_warnings(
+	repo_root: Path,
+	fp: Path,
+	op: str,
+	caught: List[warnings.WarningMessage],
+	yaml_issues: Dict[str, List[str]],
+) -> None:
+	if not caught:
+		return
+	items = yaml_issues.setdefault("warnings", [])
+	path = _fmt_rel_path(repo_root, fp)
+	for w in caught:
+		category = getattr(w, "category", None)
+		cat_name = category.__name__ if category else "Warning"
+		items.append(f"{path}: {op}: {cat_name}: {w.message}")
+
+
+def _record_yaml_error(
+	repo_root: Path,
+	fp: Path,
+	op: str,
+	err: Exception,
+	yaml_issues: Dict[str, List[str]],
+) -> None:
+	items = yaml_issues.setdefault("errors", [])
+	path = _fmt_rel_path(repo_root, fp)
+	items.append(f"{path}: {op}: {type(err).__name__}: {err}")
+
+
 def _apply_implied_flags(args: argparse.Namespace) -> None:
 	if args.pr:
 		args.write = True
@@ -145,14 +183,19 @@ def _build_hr_index(
 	*,
 	chart_name: str,
 	chartref_kind: str,
+	yaml_issues: Dict[str, List[str]],
 ) -> Tuple[Dict[HrRef, List[HrDocLoc]], Dict[str, List[HrDocLoc]]]:
 	hr_index: Dict[HrRef, List[HrDocLoc]] = {}
 	hr_index_by_name: Dict[str, List[HrDocLoc]] = {}
 
 	for fp in yaml_files:
 		try:
-			_, docs, _ = _read_all_yaml_docs(fp)
-		except Exception:
+			with warnings.catch_warnings(record=True) as caught:
+				warnings.simplefilter("always")
+				_, docs, _ = _read_all_yaml_docs(fp)
+			_record_yaml_warnings(repo_root, fp, "read", caught, yaml_issues)
+		except Exception as e:
+			_record_yaml_error(repo_root, fp, "read", e, yaml_issues)
 			continue
 
 		for i, doc in enumerate(docs):
@@ -186,6 +229,7 @@ def _apply_krr_to_repo(
 	*,
 	only_missing: bool,
 	no_name_fallback: bool,
+	yaml_issues: Dict[str, List[str]],
 ) -> Tuple[Dict[Path, YamlDocBundle], int, List[TargetKey], Dict[str, List[str]]]:
 	changed_files: Dict[Path, YamlDocBundle] = {}
 	total_changed_targets = 0
@@ -193,10 +237,17 @@ def _apply_krr_to_repo(
 	updated: List[str] = []
 	skipped: List[str] = []
 
-	def _ensure_loaded(fp: Path) -> YamlDocBundle:
+	def _ensure_loaded(fp: Path) -> Optional[YamlDocBundle]:
 		if fp in changed_files:
 			return changed_files[fp]
-		raw, docs, yaml = _read_all_yaml_docs(fp)
+		try:
+			with warnings.catch_warnings(record=True) as caught:
+				warnings.simplefilter("always")
+				raw, docs, yaml = _read_all_yaml_docs(fp)
+			_record_yaml_warnings(repo_root, fp, "read", caught, yaml_issues)
+		except Exception as e:
+			_record_yaml_error(repo_root, fp, "read", e, yaml_issues)
+			return None
 		changed_files[fp] = (raw, docs, yaml)
 		return raw, docs, yaml
 
@@ -218,7 +269,11 @@ def _apply_krr_to_repo(
 		target_changed = False
 		target_notes: List[str] = []
 		for loc in locs:
-			raw, docs, yaml = _ensure_loaded(loc.path)
+			loaded = _ensure_loaded(loc.path)
+			if loaded is None:
+				target_notes.append(f"yaml read failed @ {loc.path.relative_to(repo_root)}")
+				continue
+			raw, docs, yaml = loaded
 			doc = docs[loc.doc_index]
 			if not isinstance(doc, CommentedMap):
 				continue
@@ -254,6 +309,8 @@ def _apply_krr_to_repo(
 def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[TargetKey]) -> str:
 	updated = summary.get("updated", [])
 	skipped = summary.get("skipped", [])
+	yaml_warnings = summary.get("yaml_warnings", [])
+	yaml_errors = summary.get("yaml_errors", [])
 	unmatched_items = [
 		f"{t.hr.namespace}/{t.hr.name} controller={t.controller} container={t.container}"
 		for t in unmatched
@@ -283,12 +340,18 @@ def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[TargetKey]) -
 	lines.extend(_section("Skipped targets", skipped))
 	lines.append("")
 	lines.extend(_section("Unmatched targets", unmatched_items))
+	lines.append("")
+	lines.extend(_section("YAML warnings", yaml_warnings))
+	lines.append("")
+	lines.extend(_section("YAML errors", yaml_errors))
 	return "\n".join(lines)
 
 
 def _format_cli_summary(summary: Dict[str, List[str]], unmatched: List[TargetKey]) -> str:
 	updated = summary.get("updated", [])
 	skipped = summary.get("skipped", [])
+	yaml_warnings = summary.get("yaml_warnings", [])
+	yaml_errors = summary.get("yaml_errors", [])
 	unmatched_items = [
 		f"{t.hr.namespace}/{t.hr.name} controller={t.controller} container={t.container}"
 		for t in unmatched
@@ -316,6 +379,10 @@ def _format_cli_summary(summary: Dict[str, List[str]], unmatched: List[TargetKey
 	lines.extend(_section("Skipped targets", skipped))
 	lines.append("")
 	lines.extend(_section("Unmatched targets", unmatched_items))
+	lines.append("")
+	lines.extend(_section("YAML warnings", yaml_warnings))
+	lines.append("")
+	lines.extend(_section("YAML errors", yaml_errors))
 	return "\n".join(lines)
 
 
@@ -327,10 +394,18 @@ def _write_changes(
 	commit: bool,
 	commit_message: str,
 	forgejo_url: str,
+	yaml_issues: Dict[str, List[str]],
 ) -> List[Path]:
 	actually_changed: List[Path] = []
 	for fp, (raw, docs, yaml) in changed_files.items():
-		new_txt = _dump_all_yaml_docs(yaml, docs)
+		try:
+			with warnings.catch_warnings(record=True) as caught:
+				warnings.simplefilter("always")
+				new_txt = _dump_all_yaml_docs(yaml, docs)
+			_record_yaml_warnings(repo_root, fp, "dump", caught, yaml_issues)
+		except Exception as e:
+			_record_yaml_error(repo_root, fp, "dump", e, yaml_issues)
+			raise
 		if new_txt != raw:
 			fp.write_text(new_txt, encoding="utf-8")
 			actually_changed.append(fp)
@@ -366,10 +441,13 @@ def _maybe_create_pr(
 		print("PR SKIPPED: no changes written.")
 		return 0
 
+	token = (args.forgejo_token or "").strip()
+	if token:
+		_ensure_git_http_auth(repo_root, args.remote, token=token, auth_scheme=args.forgejo_auth_scheme)
+
 	_git_push_set_upstream(repo_root, args.remote, head_branch)
 	print(f"PUSHED: {args.remote}/{head_branch}")
 
-	token = (args.forgejo_token or "").strip()
 	if not token:
 		print(f"ERROR: missing Forgejo token. Set {_env_key('FORGEJO_TOKEN')} or FORGEJO_TOKEN.", file=sys.stderr)
 		return 2
@@ -461,11 +539,14 @@ def main() -> int:
 		print("No tracked YAML files found in repo.", file=sys.stderr)
 		return 2
 
+	yaml_issues: Dict[str, List[str]] = {"warnings": [], "errors": []}
+
 	hr_index, hr_index_by_name = _build_hr_index(
 		repo_root,
 		yaml_files,
 		chart_name=args.chart_name,
 		chartref_kind=args.chartref_kind,
+		yaml_issues=yaml_issues,
 	)
 
 	if not hr_index:
@@ -479,20 +560,23 @@ def main() -> int:
 		hr_index_by_name,
 		only_missing=args.only_missing,
 		no_name_fallback=args.no_name_fallback,
+		yaml_issues=yaml_issues,
 	)
+	summary["yaml_warnings"] = yaml_issues.get("warnings", [])
+	summary["yaml_errors"] = yaml_issues.get("errors", [])
 
 	if unmatched:
 		print("\nUnmatched KRR targets:", file=sys.stderr)
 		for t in unmatched[:200]:
 			print(f"	- {t.hr.namespace}/{t.hr.name} controller={t.controller} container={t.container}", file=sys.stderr)
 
-	print("\n" + _format_cli_summary(summary, unmatched))
-
 	if total_changed_targets == 0:
+		print("\n" + _format_cli_summary(summary, unmatched))
 		print("\nNo changes needed.")
 		return 0
 
 	if not args.write:
+		print("\n" + _format_cli_summary(summary, unmatched))
 		print(f"\nDRY-RUN: would update {len(changed_files)} file(s), {total_changed_targets} target(s). Use --write or set {_env_key('WRITE')}=1.")
 		return 0
 
@@ -503,7 +587,11 @@ def main() -> int:
 		commit=args.commit,
 		commit_message=args.commit_message,
 		forgejo_url=args.forgejo_url,
+		yaml_issues=yaml_issues,
 	)
+	summary["yaml_warnings"] = yaml_issues.get("warnings", [])
+	summary["yaml_errors"] = yaml_issues.get("errors", [])
+	print("\n" + _format_cli_summary(summary, unmatched))
 	if not actually_changed and args.pr:
 		print("No changes written; skipping PR.")
 		return 0

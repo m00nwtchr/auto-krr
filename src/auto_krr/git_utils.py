@@ -148,6 +148,33 @@ def _git_push_set_upstream(repo_root: Path, remote: str, branch: str) -> None:
 	_run_git(repo_root, ["push", "-u", remote, branch])
 
 
+def _ensure_git_http_auth(
+	repo_root: Path,
+	remote: str,
+	*,
+	token: str,
+	auth_scheme: Optional[str],
+) -> None:
+	if not token:
+		return
+	remote_url = _remote_url(repo_root, remote)
+	if not remote_url:
+		return
+	u = remote_url.strip()
+	if "://" not in u:
+		return
+	try:
+		pu = urllib.parse.urlparse(u)
+	except Exception:
+		return
+	if pu.scheme not in ("http", "https") or not pu.netloc:
+		return
+	scheme = (auth_scheme or "token").strip() or "token"
+	base = f"{pu.scheme}://{pu.netloc}/"
+	header = f"Authorization: {scheme} {token}"
+	_run_git(repo_root, ["config", f"http.{base}.extraHeader", header])
+
+
 def _remote_url(repo_root: Path, remote: str) -> Optional[str]:
 	p = _run_git(repo_root, ["remote", "get-url", remote], check=False)
 	if p.returncode != 0:
