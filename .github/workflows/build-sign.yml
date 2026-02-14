@@ -1,7 +1,7 @@
 name: build-and-sign
 on:
   push:
-    branches: ["main"]
+    branches: ["master"]
     tags: ["v*.*.*"]
   workflow_dispatch:
 permissions:
