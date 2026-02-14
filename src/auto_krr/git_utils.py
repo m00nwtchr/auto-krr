@@ -97,19 +97,21 @@ def _ensure_repo(path: Path, repo_url: Optional[str], *, git_base_url: Optional[
 
 	norm = _normalize_repo_url(repo_url, git_base_url=git_base_url)
 	dest = path
-
-	if dest.exists() and dest.is_dir() and not _dir_is_empty(dest):
-		child = dest / _repo_dir_name(repo_url)
-		if _is_git_repo(child) or (child.exists() and (child / ".git").exists()):
-			return _git_root(child)
-		dest = child
+	if dest.exists():
+		if dest.is_dir():
+			if _is_git_repo(dest) or (dest / ".git").exists():
+				return _git_root(dest)
+			child = dest / _repo_dir_name(repo_url)
+			if child.exists() and (_is_git_repo(child) or (child / ".git").exists()):
+				return _git_root(child)
+			dest = child
+		else:
+			raise RuntimeError(f"Path {dest} exists but is not a directory.")
 
 	if dest.exists():
 		if dest.is_dir() and _dir_is_empty(dest):
-			try:
-				dest.rmdir()
-			except OSError:
-				raise RuntimeError(f"Destination {dest} exists but is not removable.")
+			# Leave empty directories in place; git clone can use them as-is.
+			pass
 		else:
 			raise RuntimeError(f"Path {dest} exists but is not a git repo. Point REPO at a repo, or an empty/nonexistent directory.")
 
