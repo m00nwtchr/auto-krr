@@ -20,7 +20,7 @@ def _run(cmd: List[str], *, cwd: Path, check: bool = True) -> subprocess.Complet
 
 
 def _run_git(repo_root: Path, args: List[str], *, check: bool = True) -> subprocess.CompletedProcess:
-	return _run(["git", "-C", str(repo_root), *args], cwd=repo_root, check=check)
+	return _run(["git", "-C", str(repo_root), "-c", f"safe.directory={repo_root}", *args], cwd=repo_root, check=check)
 
 
 def _git_root(repo: Path) -> Path:
@@ -151,6 +151,66 @@ def _remote_url(repo_root: Path, remote: str) -> Optional[str]:
 	if p.returncode != 0:
 		return None
 	return p.stdout.strip()
+
+
+def _git_config_get(repo_root: Path, key: str) -> Optional[str]:
+	p = _run_git(repo_root, ["config", "--get", key], check=False)
+	if p.returncode != 0:
+		return None
+	v = p.stdout.strip()
+	return v or None
+
+
+def _host_from_url(url: str) -> Optional[str]:
+	u = (url or "").strip()
+	if not u:
+		return None
+	if "://" not in u:
+		u = "https://" + u
+	try:
+		pu = urllib.parse.urlparse(u)
+		if pu.netloc:
+			return pu.netloc
+	except Exception:
+		return None
+	return None
+
+
+def _default_git_email(repo_root: Path, forgejo_url: Optional[str]) -> str:
+	host = _host_from_url(forgejo_url or "")
+	if not host:
+		host = _host_from_url(os.environ.get("FORGEJO_URL", "") or os.environ.get("GIT_BASE_URL", ""))
+	if not host:
+		remote = _remote_url(repo_root, "origin")
+		if remote:
+			base, _, _ = _detect_forgejo_from_remote(remote)
+			host = _host_from_url(base or "")
+	if host:
+		return f"krr@{host}"
+	return "auto-krr@localhost"
+
+
+def _ensure_git_identity(repo_root: Path, *, forgejo_url: Optional[str] = None) -> None:
+	name = _git_config_get(repo_root, "user.name")
+	email = _git_config_get(repo_root, "user.email")
+	if name and email:
+		return
+
+	fallback_name = (
+		os.environ.get("GIT_AUTHOR_NAME")
+		or os.environ.get("GIT_COMMITTER_NAME")
+		or "krr-bot"
+	)
+	fallback_email = (
+		os.environ.get("GIT_AUTHOR_EMAIL")
+		or os.environ.get("GIT_COMMITTER_EMAIL")
+		or _default_git_email(repo_root, forgejo_url)
+	)
+
+	if not name:
+		_run_git(repo_root, ["config", "user.name", fallback_name])
+	if not email:
+		_run_git(repo_root, ["config", "user.email", fallback_email])
 
 
 def _detect_forgejo_from_remote(remote_url: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:

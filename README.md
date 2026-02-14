@@ -94,7 +94,7 @@ It converts CPU to millicores (`m`) and memory to Mi/Gi (rounded up). When multi
 - `--remote`: git remote to push (default: `origin`)
 - `--pr-base`: base branch for PR
 - `--pr-branch`: branch name to create/push
-- `--pr-title`, `--pr-body`: PR metadata
+- `--pr-title`: PR title
 - `--forgejo-url`, `--forgejo-owner`, `--forgejo-repo`: Forgejo repo details
 - `--forgejo-token`: Forgejo API token
 - `--forgejo-api-prefix`: API prefix (default: `/api/v1`)
@@ -125,7 +125,6 @@ Common ones:
 - `PR_BASE`
 - `PR_BRANCH`
 - `PR_TITLE`
-- `PR_BODY`
 - `FORGEJO_URL`
 - `FORGEJO_OWNER`
 - `FORGEJO_REPO`

@@ -12,6 +12,7 @@ from .env import _env_bool, _env_get, _env_key, _env_path, _env_str
 from .forgejo import _forgejo_create_pr, _forgejo_find_open_pr
 from .git_utils import (
 	_detect_forgejo_from_remote,
+	_ensure_git_identity,
 	_ensure_repo,
 	_git_checkout_new,
 	_git_current_branch,
@@ -52,7 +53,6 @@ def _parse_args() -> argparse.Namespace:
 	ap.add_argument("--pr-base", default=None, help=f"Base branch for PR (env: {_env_key('PR_BASE')})")
 	ap.add_argument("--pr-branch", default=None, help=f"Branch to create/push (env: {_env_key('PR_BRANCH')})")
 	ap.add_argument("--pr-title", default=None, help=f"PR title (env: {_env_key('PR_TITLE')})")
-	ap.add_argument("--pr-body", default=None, help=f"PR body (env: {_env_key('PR_BODY')})")
 	ap.add_argument("--forgejo-url", default=None, help=f"Forgejo base URL (env: {_env_key('FORGEJO_URL')})")
 	ap.add_argument("--forgejo-owner", default=None, help=f"Forgejo repo owner (env: {_env_key('FORGEJO_OWNER')})")
 	ap.add_argument("--forgejo-repo", default=None, help=f"Forgejo repo name (env: {_env_key('FORGEJO_REPO')})")
@@ -82,14 +82,14 @@ def _resolve_env_args(args: argparse.Namespace) -> argparse.Namespace:
 	args.write = args.write if args.write is not None else _env_bool("WRITE", False)
 	args.stage = args.stage if args.stage is not None else _env_bool("STAGE", False)
 	args.commit = args.commit if args.commit is not None else _env_bool("COMMIT", False)
-	args.commit_message = args.commit_message or _env_str("COMMIT_MESSAGE", "chore: apply krr resource recommendations")
+	args.commit_message = args.commit_message or _env_str("COMMIT_MESSAGE", "chore(krr): apply resource recommendations")
 
 	args.pr = args.pr if args.pr is not None else _env_bool("PR", False)
 	args.remote = args.remote or _env_str("REMOTE", "origin")
 	args.pr_base = args.pr_base or _env_str("PR_BASE", "")
 	args.pr_branch = args.pr_branch or _env_str("PR_BRANCH", "")
-	args.pr_title = args.pr_title or _env_str("PR_TITLE", "chore: apply krr resource recommendations")
-	args.pr_body = args.pr_body or _env_str("PR_BODY", "Automated resource recommendation update from KRR.")
+	pr_title_env = _env_get("PR_TITLE", "APPLY_KRR_PR_TITLE")
+	args.pr_title = args.pr_title or pr_title_env or "chore(krr): apply resource recommendations"
 
 	args.forgejo_url = args.forgejo_url or _env_str("FORGEJO_URL", "")
 	args.forgejo_owner = args.forgejo_owner or _env_str("FORGEJO_OWNER", "")
@@ -186,10 +186,12 @@ def _apply_krr_to_repo(
 	*,
 	only_missing: bool,
 	no_name_fallback: bool,
-) -> Tuple[Dict[Path, YamlDocBundle], int, List[TargetKey]]:
+) -> Tuple[Dict[Path, YamlDocBundle], int, List[TargetKey], Dict[str, List[str]]]:
 	changed_files: Dict[Path, YamlDocBundle] = {}
 	total_changed_targets = 0
 	unmatched: List[TargetKey] = []
+	updated: List[str] = []
+	skipped: List[str] = []
 
 	def _ensure_loaded(fp: Path) -> YamlDocBundle:
 		if fp in changed_files:
@@ -213,6 +215,8 @@ def _apply_krr_to_repo(
 			unmatched.append(target)
 			continue
 
+		target_changed = False
+		target_notes: List[str] = []
 		for loc in locs:
 			raw, docs, yaml = _ensure_loaded(loc.path)
 			doc = docs[loc.doc_index]
@@ -230,11 +234,89 @@ def _apply_krr_to_repo(
 				print(f"- {target.hr.namespace}/{target.hr.name} controller={target.controller} container={target.container} @ {loc.path.relative_to(repo_root)}")
 				for n in notes:
 					print(f"	{n}")
+				target_notes.extend(notes)
 
 			if changed:
 				total_changed_targets += 1
+				target_changed = True
+		target_id = f"{target.hr.namespace}/{target.hr.name} controller={target.controller} container={target.container}"
+		if target_changed:
+			updated.append(target_id)
+		elif target_notes:
+			reason = "; ".join(target_notes)
+			skipped.append(f"{target_id} — {reason}")
+		else:
+			skipped.append(f"{target_id} — no changes needed")
 
-	return changed_files, total_changed_targets, unmatched
+	return changed_files, total_changed_targets, unmatched, {"updated": updated, "skipped": skipped}
+
+
+def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[TargetKey]) -> str:
+	updated = summary.get("updated", [])
+	skipped = summary.get("skipped", [])
+	unmatched_items = [
+		f"{t.hr.namespace}/{t.hr.name} controller={t.controller} container={t.container}"
+		for t in unmatched
+	]
+
+	def _section(title: str, items: List[str], *, limit: int = 50) -> List[str]:
+		if not items:
+			return [f"### {title}", "_none_"]
+		lines = [f"### {title}"]
+		for item in items[:limit]:
+			lines.append(f"- {item}")
+		if len(items) > limit:
+			lines.append(f"- … and {len(items) - limit} more")
+		return lines
+
+	lines = [
+		"Automated update of Kubernetes resource requests/limits based on KRR output.",
+		"",
+		"## Summary",
+		f"- Updated targets: {len(updated)}",
+		f"- Skipped targets: {len(skipped)}",
+		f"- Unmatched targets: {len(unmatched_items)}",
+		"",
+	]
+	lines.extend(_section("Updated targets", updated))
+	lines.append("")
+	lines.extend(_section("Skipped targets", skipped))
+	lines.append("")
+	lines.extend(_section("Unmatched targets", unmatched_items))
+	return "\n".join(lines)
+
+
+def _format_cli_summary(summary: Dict[str, List[str]], unmatched: List[TargetKey]) -> str:
+	updated = summary.get("updated", [])
+	skipped = summary.get("skipped", [])
+	unmatched_items = [
+		f"{t.hr.namespace}/{t.hr.name} controller={t.controller} container={t.container}"
+		for t in unmatched
+	]
+
+	def _section(title: str, items: List[str], *, limit: int = 50) -> List[str]:
+		if not items:
+			return [f"{title}: none"]
+		lines = [f"{title}:"]
+		for item in items[:limit]:
+			lines.append(f"- {item}")
+		if len(items) > limit:
+			lines.append(f"- ... and {len(items) - limit} more")
+		return lines
+
+	lines = [
+		"Summary:",
+		f"- Updated targets: {len(updated)}",
+		f"- Skipped targets: {len(skipped)}",
+		f"- Unmatched targets: {len(unmatched_items)}",
+		"",
+	]
+	lines.extend(_section("Updated targets", updated))
+	lines.append("")
+	lines.extend(_section("Skipped targets", skipped))
+	lines.append("")
+	lines.extend(_section("Unmatched targets", unmatched_items))
+	return "\n".join(lines)
 
 
 def _write_changes(
@@ -244,6 +326,7 @@ def _write_changes(
 	stage: bool,
 	commit: bool,
 	commit_message: str,
+	forgejo_url: str,
 ) -> List[Path]:
 	actually_changed: List[Path] = []
 	for fp, (raw, docs, yaml) in changed_files.items():
@@ -260,6 +343,7 @@ def _write_changes(
 		print("STAGED: git add on changed files.")
 
 	if commit and actually_changed:
+		_ensure_git_identity(repo_root, forgejo_url=forgejo_url)
 		_run_git(repo_root, ["commit", "-m", commit_message])
 		print("COMMITTED.")
 
@@ -273,6 +357,8 @@ def _maybe_create_pr(
 	base_branch: str,
 	head_branch: str,
 	had_changes: bool,
+	summary: Dict[str, List[str]],
+	unmatched: List[TargetKey],
 ) -> int:
 	if not args.pr:
 		return 0
@@ -330,6 +416,7 @@ def _maybe_create_pr(
 			print(f"PR EXISTS: {existing}")
 			return 0
 
+		body = _format_pr_body(summary, unmatched)
 		pr_url = _forgejo_create_pr(
 			repo,
 			token=token,
@@ -337,7 +424,7 @@ def _maybe_create_pr(
 			base_branch=base_branch,
 			head_branch=head_branch,
 			title=args.pr_title,
-			body=args.pr_body,
+			body=body,
 			insecure_tls=args.insecure_tls,
 		)
 	except Exception as e:
@@ -385,7 +472,7 @@ def main() -> int:
 		print("No app-template HelmReleases found in repo (matching chartRef/chart name).", file=sys.stderr)
 		return 2
 
-	changed_files, total_changed_targets, unmatched = _apply_krr_to_repo(
+	changed_files, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
 		repo_root,
 		krr_map,
 		hr_index,
@@ -398,6 +485,8 @@ def main() -> int:
 		print("\nUnmatched KRR targets:", file=sys.stderr)
 		for t in unmatched[:200]:
 			print(f"	- {t.hr.namespace}/{t.hr.name} controller={t.controller} container={t.container}", file=sys.stderr)
+
+	print("\n" + _format_cli_summary(summary, unmatched))
 
 	if total_changed_targets == 0:
 		print("\nNo changes needed.")
@@ -413,6 +502,7 @@ def main() -> int:
 		stage=args.stage,
 		commit=args.commit,
 		commit_message=args.commit_message,
+		forgejo_url=args.forgejo_url,
 	)
 	if not actually_changed and args.pr:
 		print("No changes written; skipping PR.")
@@ -424,6 +514,8 @@ def main() -> int:
 		base_branch=base_branch,
 		head_branch=head_branch,
 		had_changes=bool(actually_changed),
+		summary=summary,
+		unmatched=unmatched,
 	)
 	if pr_status != 0:
 		return pr_status
