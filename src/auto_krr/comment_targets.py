@@ -19,19 +19,12 @@ def _find_krr_comment_targets(doc: Any) -> List[CommentTargetMatch]:
 
 	def _walk(node: Any, path: List[object]) -> None:
 		if isinstance(node, CommentedMap):
-			prev_key: Optional[object] = None
 			for key, value in node.items():
 				key_str = str(key)
 				next_path = [*path, key_str]
 				if key_str == "resources":
 					texts = _comment_texts_for_key(node, key)
 					controller, container = _parse_krr_comment(texts)
-					if (not controller or not container) and prev_key is not None:
-						controller, container = _parse_krr_comment(_comment_texts_for_key(node, prev_key))
-					if not controller or not container:
-						controller, container = _parse_krr_comment(_comment_texts_for_map(node))
-					if (not controller or not container) and prev_key is not None:
-						controller, container = _parse_krr_comment(_trailing_comment_texts(node.get(prev_key)))
 					if controller and container:
 						matches.append(
 							CommentTargetMatch(
@@ -41,7 +34,6 @@ def _find_krr_comment_targets(doc: Any) -> List[CommentTargetMatch]:
 							)
 						)
 				_walk(value, next_path)
-				prev_key = key
 		elif isinstance(node, list):
 			for idx, item in enumerate(node):
 				_walk(item, [*path, idx])
