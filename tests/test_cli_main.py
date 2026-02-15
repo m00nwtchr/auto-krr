@@ -187,6 +187,7 @@ def test_maybe_create_pr_updates_when_author_matches(monkeypatch, tmp_path: Path
 	monkeypatch.setattr(cli, "_run_git", lambda *_args, **_kw: None)
 	monkeypatch.setattr(cli, "_git_push_set_upstream", lambda *_args, **_kw: None)
 	monkeypatch.setattr(cli, "_forgejo_find_open_pr", lambda *_args, **_kw: "https://pr/1")
+	monkeypatch.setattr(cli, "_forgejo_list_open_prs", lambda *_args, **_kw: [])
 	monkeypatch.setattr(
 		cli,
 		"_forgejo_find_open_pr_data",

@@ -77,7 +77,7 @@ def test_forgejo_create_pr_returns_html_url(monkeypatch) -> None:
 
 
 def test_forgejo_find_open_pr_matches_head(monkeypatch) -> None:
-	# Intended behavior: return html_url for matching open PR and author filter.
+	# Intended behavior: return html_url for matching open PR with author filter.
 	repo = ForgejoRepo(base_url="https://forgejo.example.com", owner="o", repo="r", api_prefix="/api/v1")
 	prs = [
 		{

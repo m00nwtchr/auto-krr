@@ -5,7 +5,7 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .types import ForgejoRepo
 
@@ -188,6 +188,7 @@ def _forgejo_update_pr(
 	pr_number: int,
 	title: Optional[str] = None,
 	body: Optional[str] = None,
+	state: Optional[str] = None,
 	insecure_tls: bool,
 ) -> str:
 	api_prefix = repo.api_prefix.strip() or "/api/v1"
@@ -200,6 +201,8 @@ def _forgejo_update_pr(
 		payload["title"] = title
 	if body is not None:
 		payload["body"] = body
+	if state is not None:
+		payload["state"] = state
 	resp = _http_json("PATCH", api, token=token, auth_scheme=auth_scheme, payload=payload, insecure_tls=insecure_tls)
 	for k in ("html_url", "url"):
 		if isinstance(resp, dict) and k in resp and isinstance(resp[k], str):
@@ -223,3 +226,37 @@ def _forgejo_get_user(
 	if isinstance(resp, dict):
 		return resp
 	return {}
+
+
+def _forgejo_list_open_prs(
+	repo: ForgejoRepo,
+	*,
+	token: str,
+	auth_scheme: str,
+	base_branch: str,
+	insecure_tls: bool,
+	expected_authors: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
+	api_prefix = repo.api_prefix.strip() or "/api/v1"
+	if not api_prefix.startswith("/"):
+		api_prefix = "/" + api_prefix
+
+	query = urllib.parse.urlencode({"state": "open", "base": base_branch})
+	api = repo.base_url.rstrip("/") + api_prefix + f"/repos/{repo.owner}/{repo.repo}/pulls?{query}"
+	resp = _http_json("GET", api, token=token, auth_scheme=auth_scheme, insecure_tls=insecure_tls)
+	if not isinstance(resp, list):
+		return []
+
+	authors = {a.lower() for a in expected_authors or set()}
+	out: List[Dict[str, Any]] = []
+	for pr in resp:
+		if not isinstance(pr, dict):
+			continue
+		user = pr.get("user") or {}
+		login = ""
+		if isinstance(user, dict):
+			login = str(user.get("login") or user.get("username") or "")
+		if authors and (not login or login.lower() not in authors):
+			continue
+		out.append(pr)
+	return out

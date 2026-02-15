@@ -16,6 +16,7 @@ from .forgejo import (
 	_forgejo_find_open_pr,
 	_forgejo_find_open_pr_data,
 	_forgejo_get_user,
+	_forgejo_list_open_prs,
 	_forgejo_update_pr,
 )
 from .git_utils import (
@@ -656,6 +657,38 @@ def _maybe_create_pr(
 			insecure_tls=args.insecure_tls,
 		)
 		expected_authors = _expected_pr_authors(forgejo_user=forgejo_user)
+		if not expected_authors:
+			print("ERROR: could not determine Forgejo user; refusing to manage PRs.", file=sys.stderr)
+			return 2
+		if not (args.pr_branch or "").strip():
+			open_prs = _forgejo_list_open_prs(
+				repo,
+				token=token,
+				auth_scheme=args.forgejo_auth_scheme,
+				base_branch=base_branch,
+				insecure_tls=args.insecure_tls,
+				expected_authors=expected_authors,
+			)
+			if open_prs:
+				def _pr_sort_key(pr: Dict[str, object]) -> str:
+					return str(pr.get("updated_at") or pr.get("created_at") or pr.get("number") or "")
+
+				open_prs.sort(key=_pr_sort_key, reverse=True)
+				chosen = open_prs[0]
+				for pr in open_prs[1:]:
+					if isinstance(pr.get("number"), int):
+						_forgejo_update_pr(
+							repo,
+							token=token,
+							auth_scheme=args.forgejo_auth_scheme,
+							pr_number=pr["number"],
+							state="closed",
+							insecure_tls=args.insecure_tls,
+						)
+				head = chosen.get("head") or {}
+				if isinstance(head, dict):
+					head_branch = str(head.get("ref") or head.get("name") or head_branch)
+
 		existing = _forgejo_find_open_pr(
 			repo,
 			token=token,
