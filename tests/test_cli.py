@@ -79,6 +79,7 @@ spec:
 		comment_index=comment_index,
 		only_missing=False,
 		no_name_fallback=True,
+		cli_format="compact",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
@@ -125,6 +126,7 @@ spec:
 		comment_index=comment_index,
 		only_missing=False,
 		no_name_fallback=True,
+		cli_format="compact",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
@@ -171,6 +173,7 @@ spec:
 		comment_index=comment_index,
 		only_missing=False,
 		no_name_fallback=True,
+		cli_format="compact",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
@@ -262,6 +265,7 @@ spec:
 		comment_index=comment_index,
 		only_missing=False,
 		no_name_fallback=True,
+		cli_format="compact",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 

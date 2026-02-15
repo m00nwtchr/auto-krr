@@ -73,6 +73,12 @@ def _parse_args() -> argparse.Namespace:
 	ap.add_argument("--insecure-tls", action="store_true", default=None, help=f"Disable TLS verification for Forgejo API (env: {_env_key('INSECURE_TLS')})")
 	ap.add_argument("--allow-dirty", action="store_true", default=None, help=f"Allow running with dirty git tree (env: {_env_key('ALLOW_DIRTY')})")
 	ap.add_argument("--verbose-git", action="store_true", default=None, help=f"Verbose git output (env: {_env_key('GIT_VERBOSE')})")
+	ap.add_argument(
+		"--cli-format",
+		default=None,
+		choices=("compact", "pretty"),
+		help=f"CLI output format: compact/pretty (env: {_env_key('CLI_FORMAT')})",
+	)
 	return ap.parse_args()
 
 
@@ -111,6 +117,7 @@ def _resolve_env_args(args: argparse.Namespace) -> argparse.Namespace:
 	args.insecure_tls = args.insecure_tls if args.insecure_tls is not None else _env_bool("INSECURE_TLS", False)
 	args.allow_dirty = args.allow_dirty if args.allow_dirty is not None else _env_bool("ALLOW_DIRTY", False)
 	args.verbose_git = args.verbose_git if args.verbose_git is not None else _env_bool("GIT_VERBOSE", False)
+	args.cli_format = args.cli_format or _env_str("CLI_FORMAT", "compact")
 	return args
 
 
@@ -150,7 +157,15 @@ def _record_yaml_error(
 	items.append(f"{path}: {op}: {type(err).__name__}: {err}")
 
 
-def _format_krr_rec(rec: Optional[RecommendedResources]) -> str:
+def _format_change_summary(parts: List[str], *, mode: str) -> str:
+	if not parts:
+		return ""
+	if mode == "markdown":
+		return f"**changes:** `{', '.join(parts)}`"
+	return f"changes:({', '.join(parts)})"
+
+
+def _format_krr_rec(rec: Optional[RecommendedResources], *, mode: str) -> str:
 	if rec is None:
 		return ""
 	parts: List[str] = []
@@ -165,12 +180,10 @@ def _format_krr_rec(rec: Optional[RecommendedResources]) -> str:
 	_fmt("req_mem", rec.cur_req_mem_bytes, rec.req_mem_bytes, _mem_qty)
 	_fmt("lim_cpu", rec.cur_lim_cpu_cores, rec.lim_cpu_cores, _cpu_qty)
 	_fmt("lim_mem", rec.cur_lim_mem_bytes, rec.lim_mem_bytes, _mem_qty)
-	if not parts:
-		return ""
-	return f" changes:({', '.join(parts)})"
+	return _format_change_summary(parts, mode=mode)
 
 
-def _format_change_notes(notes: List[str]) -> str:
+def _format_change_notes(notes: List[str], *, mode: str) -> str:
 	changes: dict[str, tuple[str, str]] = {}
 	key_map = {
 		"requests.cpu": "req_cpu",
@@ -203,16 +216,16 @@ def _format_change_notes(notes: List[str]) -> str:
 
 	order = ("req_cpu", "req_mem", "lim_cpu", "lim_mem")
 	parts = [f"{key}={changes[key][0]}->{changes[key][1]}" for key in order if key in changes]
-	if not parts:
-		return ""
-	return f" changes:({', '.join(parts)})"
+	return _format_change_summary(parts, mode=mode)
 
 
-def _format_label_with_changes(label: str, notes: List[str]) -> str:
-	change_summary = _format_change_notes(notes)
+def _format_label_with_changes(label: str, notes: List[str], *, mode: str) -> str:
+	change_summary = _format_change_notes(notes, mode=mode)
 	if not change_summary:
 		return label
-	return f"{label} {change_summary}"
+	if mode == "compact":
+		return f"{label} {change_summary}"
+	return f"{label} — {change_summary}"
 
 
 def _apply_implied_flags(args: argparse.Namespace) -> None:
@@ -311,13 +324,16 @@ def _apply_krr_to_repo(
 	*,
 	only_missing: bool,
 	no_name_fallback: bool,
+	cli_format: str = "compact",
 	yaml_issues: Dict[str, List[str]],
 ) -> Tuple[Dict[Path, YamlDocBundle], int, List[str], Dict[str, List[str]]]:
 	changed_files: Dict[Path, YamlDocBundle] = {}
 	total_changed_targets = 0
 	unmatched: List[str] = []
-	updated: List[str] = []
-	skipped: List[str] = []
+	updated_cli: List[str] = []
+	updated_markdown: List[str] = []
+	skipped_cli: List[str] = []
+	skipped_markdown: List[str] = []
 
 	def _ensure_loaded(fp: Path) -> Optional[YamlDocBundle]:
 		if fp in changed_files:
@@ -350,8 +366,11 @@ def _apply_krr_to_repo(
 		repo_root=repo_root,
 		matched_targets=matched_targets,
 		seen_resources=seen_resources,
-		updated=updated,
-		skipped=skipped,
+		updated_cli=updated_cli,
+		updated_markdown=updated_markdown,
+		skipped_cli=skipped_cli,
+		skipped_markdown=skipped_markdown,
+		cli_format=cli_format,
 	)
 
 	total_changed_targets += _apply_with_matcher(
@@ -362,8 +381,11 @@ def _apply_krr_to_repo(
 		repo_root=repo_root,
 		matched_targets=matched_targets,
 		seen_resources=seen_resources,
-		updated=updated,
-		skipped=skipped,
+		updated_cli=updated_cli,
+		updated_markdown=updated_markdown,
+		skipped_cli=skipped_cli,
+		skipped_markdown=skipped_markdown,
+		cli_format=cli_format,
 	)
 
 	def _describe_unmatched(target: TargetKey) -> str:
@@ -374,18 +396,52 @@ def _apply_krr_to_repo(
 		controller_label = ""
 		if target.controller and target.controller != name:
 			controller_label = f" controller={target.controller}"
-		change_summary = _format_krr_rec(rec_map.get(target))
-		if change_summary:
-			change_summary = f" {change_summary}"
-		return f"{kind} {namespace}/{name}{controller_label} container={target.container} (unmatched){change_summary}"
+		change_summary = _format_krr_rec(rec_map.get(target), mode=cli_format)
+		if not change_summary:
+			sep = ""
+		elif cli_format == "pretty":
+			sep = " — "
+		else:
+			sep = " "
+		return f"{kind} {namespace}/{name}{controller_label} container={target.container} (unmatched){sep}{change_summary}"
+
+	def _describe_unmatched_markdown(target: TargetKey) -> str:
+		hint = hints_map.get(target)
+		kind = (hint.kind if hint and hint.kind else None) or "resource"
+		namespace = (hint.namespace if hint and hint.namespace else None) or "unknown"
+		name = (hint.name if hint and hint.name else None) or "unknown"
+		controller_label = ""
+		if target.controller and target.controller != name:
+			controller_label = f" controller={target.controller}"
+		change_summary = _format_krr_rec(rec_map.get(target), mode="markdown")
+		sep = " — " if change_summary else ""
+		return f"{kind} {namespace}/{name}{controller_label} container={target.container} (unmatched){sep}{change_summary}"
 
 	unmatched = [
 		_describe_unmatched(target)
 		for target in rec_map.keys()
 		if target not in matched_targets
 	]
+	unmatched_markdown = [
+		_describe_unmatched_markdown(target)
+		for target in rec_map.keys()
+		if target not in matched_targets
+	]
 
-	return changed_files, total_changed_targets, unmatched, {"updated": updated, "skipped": skipped}
+	return (
+		changed_files,
+		total_changed_targets,
+		unmatched,
+		{
+			"updated": updated_cli,
+			"updated_cli": updated_cli,
+			"updated_markdown": updated_markdown,
+			"skipped": skipped_cli,
+			"skipped_cli": skipped_cli,
+			"skipped_markdown": skipped_markdown,
+			"unmatched_markdown": unmatched_markdown,
+		},
+	)
 
 
 def _apply_with_matcher(
@@ -397,8 +453,11 @@ def _apply_with_matcher(
 	repo_root: Path,
 	matched_targets: Optional[set[TargetKey]],
 	seen_resources: set[tuple[str, int, int]],
-	updated: List[str],
-	skipped: List[str],
+	updated_cli: List[str],
+	updated_markdown: List[str],
+	skipped_cli: List[str],
+	skipped_markdown: List[str],
+	cli_format: str,
 ) -> int:
 	changed_targets = 0
 
@@ -407,12 +466,16 @@ def _apply_with_matcher(
 		target_id = matcher.describe_target(target)
 
 		if target_match.rec is None:
-			skipped.append(f"{target_id} — no KRR match")
+			line = f"{target_id} — no KRR match"
+			skipped_cli.append(line)
+			skipped_markdown.append(line)
 			continue
 
 		if not target_match.match or not target_match.match.locs:
 			if matched_targets is None:
-				skipped.append(f"{target_id} — no matching resources")
+				line = f"{target_id} — no matching resources"
+				skipped_cli.append(line)
+				skipped_markdown.append(line)
 			continue
 
 		if matched_targets is not None:
@@ -435,26 +498,36 @@ def _apply_with_matcher(
 		if matcher.summarize_per_match:
 			for outcome in outcomes:
 				if outcome.changed:
-					updated.append(_format_label_with_changes(outcome.label, outcome.notes))
+					updated_cli.append(_format_label_with_changes(outcome.label, outcome.notes, mode=cli_format))
+					updated_markdown.append(_format_label_with_changes(outcome.label, outcome.notes, mode="markdown"))
 					changed_targets += 1
 				elif outcome.notes:
 					reason = "; ".join(outcome.notes)
-					skipped.append(f"{outcome.label} — {reason}")
+					line = f"{outcome.label} — {reason}"
+					skipped_cli.append(line)
+					skipped_markdown.append(line)
 				else:
-					skipped.append(f"{outcome.label} — no changes needed")
+					line = f"{outcome.label} — no changes needed"
+					skipped_cli.append(line)
+					skipped_markdown.append(line)
 		else:
 			target_changed = any(outcome.changed for outcome in outcomes)
 			target_notes = []
 			for outcome in outcomes:
 				target_notes.extend(outcome.notes)
 			if target_changed:
-				updated.append(_format_label_with_changes(target_id, target_notes))
+				updated_cli.append(_format_label_with_changes(target_id, target_notes, mode=cli_format))
+				updated_markdown.append(_format_label_with_changes(target_id, target_notes, mode="markdown"))
 				changed_targets += 1
 			elif target_notes:
 				reason = "; ".join(target_notes)
-				skipped.append(f"{target_id} — {reason}")
+				line = f"{target_id} — {reason}"
+				skipped_cli.append(line)
+				skipped_markdown.append(line)
 			else:
-				skipped.append(f"{target_id} — no changes needed")
+				line = f"{target_id} — no changes needed"
+				skipped_cli.append(line)
+				skipped_markdown.append(line)
 
 	return changed_targets
 
@@ -531,11 +604,11 @@ def _apply_to_target_matches(
 
 
 def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
-	updated = summary.get("updated", [])
-	skipped = summary.get("skipped", [])
+	updated = summary.get("updated_markdown") or summary.get("updated", [])
+	skipped = summary.get("skipped_markdown") or summary.get("skipped", [])
 	yaml_warnings = summary.get("yaml_warnings", [])
 	yaml_errors = summary.get("yaml_errors", [])
-	unmatched_items = list(unmatched)
+	unmatched_items = list(summary.get("unmatched_markdown") or unmatched)
 
 	def _section(title: str, items: List[str], *, limit: int = 50) -> List[str]:
 		if not items:
@@ -547,6 +620,20 @@ def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
 			lines.append(f"- … and {len(items) - limit} more")
 		return lines
 
+	def _collapse(title: str, items: List[str], *, limit: int = 50) -> List[str]:
+		label = f"{title} ({len(items)})"
+		lines = ["<details>", f"<summary>{label}</summary>", ""]
+		if not items:
+			lines.append("_none_")
+			lines.append("</details>")
+			return lines
+		for item in items[:limit]:
+			lines.append(f"- {item}")
+		if len(items) > limit:
+			lines.append(f"- … and {len(items) - limit} more")
+		lines.append("</details>")
+		return lines
+
 	lines = [
 		"Automated update of Kubernetes resource requests/limits based on KRR output.",
 		"",
@@ -556,15 +643,15 @@ def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
 		f"- Unmatched targets: {len(unmatched_items)}",
 		"",
 	]
-	lines.extend(_section("Updated targets", updated))
+	lines.extend(_collapse("Updated targets", updated))
 	lines.append("")
-	lines.extend(_section("Skipped targets", skipped))
+	lines.extend(_collapse("Skipped targets", skipped))
 	lines.append("")
-	lines.extend(_section("Unmatched targets", unmatched_items))
+	lines.extend(_collapse("Unmatched targets", unmatched_items))
 	lines.append("")
-	lines.extend(_section("YAML warnings", yaml_warnings))
+	lines.extend(_collapse("YAML warnings", yaml_warnings))
 	lines.append("")
-	lines.extend(_section("YAML errors", yaml_errors))
+	lines.extend(_collapse("YAML errors", yaml_errors))
 	return "\n".join(lines)
 
 
@@ -586,12 +673,17 @@ def _expected_pr_authors(*, forgejo_user: Optional[Dict[str, object]] = None) ->
 	return authors
 
 
-def _format_cli_summary(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
-	updated = summary.get("updated", [])
-	skipped = summary.get("skipped", [])
+def _format_cli_summary(
+	summary: Dict[str, List[str]],
+	unmatched: List[str],
+	*,
+	cli_format: str = "compact",
+) -> str:
+	updated = summary.get("updated_cli") or summary.get("updated", [])
+	skipped = summary.get("skipped_cli") or summary.get("skipped", [])
+	unmatched_items = list(unmatched)
 	yaml_warnings = summary.get("yaml_warnings", [])
 	yaml_errors = summary.get("yaml_errors", [])
-	unmatched_items = list(unmatched)
 
 	def _section(title: str, items: List[str], *, limit: int = 50) -> List[str]:
 		if not items:
@@ -849,6 +941,7 @@ def main() -> int:
 
 	def _run_apply_and_pr() -> int:
 		yaml_issues: Dict[str, List[str]] = {"warnings": [], "errors": []}
+		cli_format = getattr(args, "cli_format", "compact")
 
 		hr_index, hr_index_by_name, comment_index = _build_hr_index(
 			repo_root,
@@ -865,23 +958,25 @@ def main() -> int:
 			comment_index,
 			only_missing=args.only_missing,
 			no_name_fallback=args.no_name_fallback,
+			cli_format=cli_format,
 			yaml_issues=yaml_issues,
 		)
 		summary["yaml_warnings"] = yaml_issues.get("warnings", [])
 		summary["yaml_errors"] = yaml_issues.get("errors", [])
+		unmatched_out = unmatched
 
-		if unmatched:
+		if unmatched_out:
 			print("\nUnmatched KRR targets:", file=sys.stderr)
-			for t in unmatched[:200]:
+			for t in unmatched_out[:200]:
 				print(f"	- {t}", file=sys.stderr)
 
 		if total_changed_targets == 0:
-			print("\n" + _format_cli_summary(summary, unmatched))
+			print("\n" + _format_cli_summary(summary, unmatched, cli_format=cli_format))
 			print("\nNo changes needed.")
 			return 0
 
 		if not args.write:
-			print("\n" + _format_cli_summary(summary, unmatched))
+			print("\n" + _format_cli_summary(summary, unmatched, cli_format=cli_format))
 			print(f"\nDRY-RUN: would update {len(changed_files)} file(s), {total_changed_targets} target(s). Use --write or set {_env_key('WRITE')}=1.")
 			return 0
 
@@ -896,7 +991,7 @@ def main() -> int:
 		)
 		summary["yaml_warnings"] = yaml_issues.get("warnings", [])
 		summary["yaml_errors"] = yaml_issues.get("errors", [])
-		print("\n" + _format_cli_summary(summary, unmatched))
+		print("\n" + _format_cli_summary(summary, unmatched, cli_format=cli_format))
 		if not actually_changed and args.pr:
 			print("No changes written; skipping PR.")
 			return 0
