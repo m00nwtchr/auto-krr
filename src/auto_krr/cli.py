@@ -587,12 +587,6 @@ def _maybe_create_pr(
 		return 0
 
 	token = (args.forgejo_token or "").strip()
-	if token:
-		_ensure_git_http_auth(repo_root, args.remote, token=token, auth_scheme=args.forgejo_auth_scheme)
-
-	_git_push_set_upstream(repo_root, args.remote, head_branch)
-	print(f"PUSHED: {args.remote}/{head_branch}")
-
 	if not token:
 		print(f"ERROR: missing Forgejo token. Set {_env_key('FORGEJO_TOKEN')} or FORGEJO_TOKEN.", file=sys.stderr)
 		return 2
@@ -626,6 +620,9 @@ def _maybe_create_pr(
 		api_prefix=args.forgejo_api_prefix,
 	)
 
+	if token:
+		_ensure_git_http_auth(repo_root, args.remote, token=token, auth_scheme=args.forgejo_auth_scheme)
+
 	try:
 		existing = _forgejo_find_open_pr(
 			repo,
@@ -636,8 +633,22 @@ def _maybe_create_pr(
 			insecure_tls=args.insecure_tls,
 		)
 		if existing:
+			_run_git(repo_root, ["checkout", head_branch])
+			_run_git(repo_root, ["fetch", args.remote, base_branch])
+			try:
+				_run_git(repo_root, ["rebase", f"{args.remote}/{base_branch}"])
+			except Exception:
+				_run_git(repo_root, ["rebase", "--abort"], check=False)
+				_run_git(repo_root, ["reset", "--hard", f"{args.remote}/{base_branch}"])
+				print("REBASE CONFLICT: discarded local changes, will re-apply.")
+				return 3
+			_git_push_set_upstream(repo_root, args.remote, head_branch)
+			print(f"PUSHED: {args.remote}/{head_branch}")
 			print(f"PR EXISTS: {existing}")
 			return 0
+
+		_git_push_set_upstream(repo_root, args.remote, head_branch)
+		print(f"PUSHED: {args.remote}/{head_branch}")
 
 		body = _format_pr_body(summary, unmatched)
 		pr_url = _forgejo_create_pr(
@@ -685,72 +696,77 @@ def main() -> int:
 		print("No tracked YAML files found in repo.", file=sys.stderr)
 		return 2
 
-	yaml_issues: Dict[str, List[str]] = {"warnings": [], "errors": []}
+	def _run_apply_and_pr() -> int:
+		yaml_issues: Dict[str, List[str]] = {"warnings": [], "errors": []}
 
-	hr_index, hr_index_by_name, comment_index = _build_hr_index(
-		repo_root,
-		yaml_files,
-		chart_name=args.chart_name,
-		chartref_kind=args.chartref_kind,
-		yaml_issues=yaml_issues,
-	)
+		hr_index, hr_index_by_name, comment_index = _build_hr_index(
+			repo_root,
+			yaml_files,
+			chart_name=args.chart_name,
+			chartref_kind=args.chartref_kind,
+			yaml_issues=yaml_issues,
+		)
 
-	changed_files, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
-		repo_root,
-		krr_map,
-		comment_map,
-		hr_index,
-		hr_index_by_name,
-		comment_index,
-		chart_name=args.chart_name,
-		only_missing=args.only_missing,
-		no_name_fallback=args.no_name_fallback,
-		yaml_issues=yaml_issues,
-	)
-	summary["yaml_warnings"] = yaml_issues.get("warnings", [])
-	summary["yaml_errors"] = yaml_issues.get("errors", [])
+		changed_files, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
+			repo_root,
+			krr_map,
+			comment_map,
+			hr_index,
+			hr_index_by_name,
+			comment_index,
+			chart_name=args.chart_name,
+			only_missing=args.only_missing,
+			no_name_fallback=args.no_name_fallback,
+			yaml_issues=yaml_issues,
+		)
+		summary["yaml_warnings"] = yaml_issues.get("warnings", [])
+		summary["yaml_errors"] = yaml_issues.get("errors", [])
 
-	if unmatched:
-		print("\nUnmatched KRR targets:", file=sys.stderr)
-		for t in unmatched[:200]:
-			print(f"	- {t}", file=sys.stderr)
+		if unmatched:
+			print("\nUnmatched KRR targets:", file=sys.stderr)
+			for t in unmatched[:200]:
+				print(f"	- {t}", file=sys.stderr)
 
-	if total_changed_targets == 0:
+		if total_changed_targets == 0:
+			print("\n" + _format_cli_summary(summary, unmatched))
+			print("\nNo changes needed.")
+			return 0
+
+		if not args.write:
+			print("\n" + _format_cli_summary(summary, unmatched))
+			print(f"\nDRY-RUN: would update {len(changed_files)} file(s), {total_changed_targets} target(s). Use --write or set {_env_key('WRITE')}=1.")
+			return 0
+
+		actually_changed = _write_changes(
+			repo_root,
+			changed_files,
+			stage=args.stage,
+			commit=args.commit,
+			commit_message=args.commit_message,
+			forgejo_url=args.forgejo_url,
+			yaml_issues=yaml_issues,
+		)
+		summary["yaml_warnings"] = yaml_issues.get("warnings", [])
+		summary["yaml_errors"] = yaml_issues.get("errors", [])
 		print("\n" + _format_cli_summary(summary, unmatched))
-		print("\nNo changes needed.")
-		return 0
+		if not actually_changed and args.pr:
+			print("No changes written; skipping PR.")
+			return 0
 
-	if not args.write:
-		print("\n" + _format_cli_summary(summary, unmatched))
-		print(f"\nDRY-RUN: would update {len(changed_files)} file(s), {total_changed_targets} target(s). Use --write or set {_env_key('WRITE')}=1.")
-		return 0
-
-	actually_changed = _write_changes(
-		repo_root,
-		changed_files,
-		stage=args.stage,
-		commit=args.commit,
-		commit_message=args.commit_message,
-		forgejo_url=args.forgejo_url,
-		yaml_issues=yaml_issues,
-	)
-	summary["yaml_warnings"] = yaml_issues.get("warnings", [])
-	summary["yaml_errors"] = yaml_issues.get("errors", [])
-	print("\n" + _format_cli_summary(summary, unmatched))
-	if not actually_changed and args.pr:
-		print("No changes written; skipping PR.")
-		return 0
-
-	pr_status = _maybe_create_pr(
-		args,
-		repo_root,
-		base_branch=base_branch,
-		head_branch=head_branch,
-		had_changes=bool(actually_changed),
-		summary=summary,
-		unmatched=unmatched,
-	)
-	if pr_status != 0:
+		pr_status = _maybe_create_pr(
+			args,
+			repo_root,
+			base_branch=base_branch,
+			head_branch=head_branch,
+			had_changes=bool(actually_changed),
+			summary=summary,
+			unmatched=unmatched,
+		)
 		return pr_status
+
+	for _ in range(2):
+		pr_status = _run_apply_and_pr()
+		if pr_status != 3:
+			return pr_status
 
 	return 0

@@ -119,3 +119,33 @@ def test_maybe_create_pr_short_circuits(monkeypatch, tmp_path: Path) -> None:
 	args = _base_args(tmp_path)
 	args.pr = False
 	assert cli._maybe_create_pr(args, tmp_path, base_branch="main", head_branch="branch", had_changes=True, summary={}, unmatched=[]) == 0
+
+
+def test_main_retries_on_rebase_conflict(monkeypatch, tmp_path: Path) -> None:
+	# Intended behavior: re-run apply logic after rebase conflict.
+	manifest_path = _write_manifest(tmp_path)
+	args = _base_args(tmp_path)
+	args.write = True
+	args.pr = True
+	args.forgejo_token = "t"
+
+	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
+	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
+
+	call_state = {"calls": 0}
+
+	def _fake_maybe_create_pr(*_args, **_kwargs):
+		call_state["calls"] += 1
+		return 3 if call_state["calls"] == 1 else 0
+
+	monkeypatch.setattr(cli, "_parse_args", lambda: args)
+	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
+	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
+	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
+	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
+	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
+	monkeypatch.setattr(cli, "_maybe_create_pr", _fake_maybe_create_pr)
+
+	assert cli.main() == 0
+	assert call_state["calls"] == 2
