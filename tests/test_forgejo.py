@@ -77,13 +77,14 @@ def test_forgejo_create_pr_returns_html_url(monkeypatch) -> None:
 
 
 def test_forgejo_find_open_pr_matches_head(monkeypatch) -> None:
-	# Intended behavior: return html_url for matching open PR.
+	# Intended behavior: return html_url for matching open PR and author filter.
 	repo = ForgejoRepo(base_url="https://forgejo.example.com", owner="o", repo="r", api_prefix="/api/v1")
 	prs = [
 		{
 			"state": "open",
 			"head": {"ref": "feature", "label": "o:feature"},
 			"base": {"ref": "main"},
+			"user": {"login": "me"},
 			"html_url": "https://pr/2",
 		}
 	]
@@ -95,5 +96,6 @@ def test_forgejo_find_open_pr_matches_head(monkeypatch) -> None:
 		base_branch="main",
 		head_branch="feature",
 		insecure_tls=False,
+		expected_authors={"me"},
 	)
 	assert out == "https://pr/2"

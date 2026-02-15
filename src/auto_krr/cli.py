@@ -649,6 +649,13 @@ def _maybe_create_pr(
 		_ensure_git_http_auth(repo_root, args.remote, token=token, auth_scheme=args.forgejo_auth_scheme)
 
 	try:
+		forgejo_user = _forgejo_get_user(
+			repo,
+			token=token,
+			auth_scheme=args.forgejo_auth_scheme,
+			insecure_tls=args.insecure_tls,
+		)
+		expected_authors = _expected_pr_authors(forgejo_user=forgejo_user)
 		existing = _forgejo_find_open_pr(
 			repo,
 			token=token,
@@ -656,6 +663,7 @@ def _maybe_create_pr(
 			base_branch=base_branch,
 			head_branch=head_branch,
 			insecure_tls=args.insecure_tls,
+			expected_authors=expected_authors,
 		)
 		if existing:
 			_run_git(repo_root, ["checkout", head_branch])
@@ -677,31 +685,18 @@ def _maybe_create_pr(
 				base_branch=base_branch,
 				head_branch=head_branch,
 				insecure_tls=args.insecure_tls,
+				expected_authors=expected_authors,
 			)
 			if pr_data and isinstance(pr_data.get("number"), int):
-				author = ""
-				user = pr_data.get("user") or {}
-				if isinstance(user, dict):
-					author = str(user.get("login") or user.get("username") or "")
-				forgejo_user = _forgejo_get_user(
+				pr_url = _forgejo_update_pr(
 					repo,
 					token=token,
 					auth_scheme=args.forgejo_auth_scheme,
+					pr_number=pr_data["number"],
+					body=body,
 					insecure_tls=args.insecure_tls,
 				)
-				allowed = _expected_pr_authors(forgejo_user=forgejo_user)
-				if author and author.lower() in allowed:
-					pr_url = _forgejo_update_pr(
-						repo,
-						token=token,
-						auth_scheme=args.forgejo_auth_scheme,
-						pr_number=pr_data["number"],
-						body=body,
-						insecure_tls=args.insecure_tls,
-					)
-					print(f"PR UPDATED: {pr_url}")
-				else:
-					print("PR EXISTS: not updating (author mismatch).")
+				print(f"PR UPDATED: {pr_url}")
 			print(f"PR EXISTS: {existing}")
 			return 0
 

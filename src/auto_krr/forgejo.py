@@ -95,55 +95,22 @@ def _forgejo_find_open_pr(
 	base_branch: str,
 	head_branch: str,
 	insecure_tls: bool,
+	expected_authors: Optional[set[str]] = None,
 ) -> Optional[str]:
-	api_prefix = repo.api_prefix.strip() or "/api/v1"
-	if not api_prefix.startswith("/"):
-		api_prefix = "/" + api_prefix
-
-	query = urllib.parse.urlencode(
-		{
-			"state": "open",
-			"base": base_branch,
-			"head": f"{repo.owner}:{head_branch}",
-		}
+	pr = _forgejo_find_open_pr_data(
+		repo,
+		token=token,
+		auth_scheme=auth_scheme,
+		base_branch=base_branch,
+		head_branch=head_branch,
+		insecure_tls=insecure_tls,
+		expected_authors=expected_authors,
 	)
-	api = repo.base_url.rstrip("/") + api_prefix + f"/repos/{repo.owner}/{repo.repo}/pulls?{query}"
-	resp = _http_json("GET", api, token=token, auth_scheme=auth_scheme, insecure_tls=insecure_tls)
-	if not isinstance(resp, list):
+	if not pr:
 		return None
-
-	def _owner_name(h: Dict[str, Any]) -> str:
-		repo_obj = h.get("repo") or {}
-		owner_obj = repo_obj.get("owner") or {}
-		return str(owner_obj.get("login") or owner_obj.get("username") or owner_obj.get("name") or "")
-
-	for pr in resp:
-		if not isinstance(pr, dict):
-			continue
-		if str(pr.get("state") or "").lower() not in ("open", ""):
-			continue
-		head = pr.get("head") or {}
-		base = pr.get("base") or {}
-		head_ref = str(head.get("ref") or head.get("name") or "")
-		base_ref = str(base.get("ref") or base.get("name") or "")
-		head_label = str(head.get("label") or "")
-		head_owner = _owner_name(head)
-
-		if base_ref and base_ref != base_branch:
-			continue
-
-		if head_ref == head_branch:
-			pass
-		elif head_label.endswith(f":{head_branch}"):
-			pass
-		elif head_owner and head_owner == repo.owner and head_ref == head_branch:
-			pass
-		else:
-			continue
-
-		for k in ("html_url", "url"):
-			if k in pr and isinstance(pr[k], str):
-				return pr[k]
+	for k in ("html_url", "url"):
+		if k in pr and isinstance(pr[k], str):
+			return pr[k]
 	return None
 
 
@@ -155,6 +122,7 @@ def _forgejo_find_open_pr_data(
 	base_branch: str,
 	head_branch: str,
 	insecure_tls: bool,
+	expected_authors: Optional[set[str]] = None,
 ) -> Optional[Dict[str, Any]]:
 	api_prefix = repo.api_prefix.strip() or "/api/v1"
 	if not api_prefix.startswith("/"):
@@ -188,6 +156,13 @@ def _forgejo_find_open_pr_data(
 		base_ref = str(base.get("ref") or base.get("name") or "")
 		head_label = str(head.get("label") or "")
 		head_owner = _owner_name(head)
+		if expected_authors:
+			user = pr.get("user") or {}
+			login = ""
+			if isinstance(user, dict):
+				login = str(user.get("login") or user.get("username") or "")
+			if not login or login.lower() not in expected_authors:
+				continue
 
 		if base_ref and base_ref != base_branch:
 			continue
