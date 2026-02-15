@@ -23,6 +23,7 @@
 ## Testing Guidelines
 - No dedicated test suite is present yet. If adding tests, place them under `tests/` and name files `test_*.py`.
 - Prefer `pytest` conventions if you introduce it; document how to run tests in the PR.
+- Tests should reflect intended behaviour and be used to validate whether changes match that intent.
 
 ## Commit & Pull Request Guidelines
 - Recent commits use short, imperative summaries; some follow Conventional Commits (`fix: ...`).

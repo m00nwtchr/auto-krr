@@ -37,6 +37,10 @@
     };
   };
 
+  tasks."auto-krr:test" = {
+    exec = "pytest";
+  };
+
   # https://devenv.sh/git-hooks/
   git-hooks.hooks = {
     treefmt.enable = true;

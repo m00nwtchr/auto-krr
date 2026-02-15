@@ -5,6 +5,7 @@ from auto_krr.types import HrRef, RecommendedResources, TargetKey
 
 
 def test_cpu_mem_qty_rounding() -> None:
+	# Intended behavior: round CPU/memory quantities up to valid units.
 	assert _cpu_qty(0.5) == "500m"
 	assert _cpu_qty(1.0) == "1"
 	assert _cpu_qty(0.0001) == "1m"
@@ -15,6 +16,7 @@ def test_cpu_mem_qty_rounding() -> None:
 
 
 def test_pick_controller_and_container_keys() -> None:
+	# Intended behavior: pick deterministic fallbacks for controller/container selection.
 	controllers = CommentedMap()
 	controllers["main"] = CommentedMap()
 	controllers["worker"] = CommentedMap()
@@ -35,6 +37,7 @@ def test_pick_controller_and_container_keys() -> None:
 
 
 def test_apply_to_hr_doc_only_missing() -> None:
+	# Intended behavior: only fill missing values when only_missing=True.
 	requests = CommentedMap({"cpu": "250m"})
 	resources = CommentedMap({"requests": requests})
 	containers = CommentedMap({"app": CommentedMap({"resources": resources})})
@@ -52,6 +55,7 @@ def test_apply_to_hr_doc_only_missing() -> None:
 
 
 def test_apply_to_hr_doc_overwrite() -> None:
+	# Intended behavior: overwrite values when only_missing=False.
 	requests = CommentedMap({"cpu": "250m"})
 	resources = CommentedMap({"requests": requests})
 	containers = CommentedMap({"app": CommentedMap({"resources": resources})})

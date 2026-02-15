@@ -7,6 +7,7 @@ from auto_krr.krr import _aggregate_krr, _safe_float
 
 
 def test_safe_float() -> None:
+	# Intended behavior: tolerate unknowns and parse numeric strings.
 	assert _safe_float("1.25") == 1.25
 	assert _safe_float(" ? ") is None
 	assert _safe_float("") is None
@@ -14,6 +15,7 @@ def test_safe_float() -> None:
 
 
 def test_aggregate_krr_merges_and_filters(tmp_path: Path) -> None:
+	# Intended behavior: merge max values at or above min_severity into both maps.
 	data = {
 		"scans": [
 			{
@@ -65,15 +67,17 @@ def test_aggregate_krr_merges_and_filters(tmp_path: Path) -> None:
 	json_path = tmp_path / "krr.json"
 	json_path.write_text(json.dumps(data), encoding="utf-8")
 
-	out = _aggregate_krr(json_path, min_severity="WARNING")
-	assert len(out) == 1
-	rec = next(iter(out.values()))
+	hr_out, comment_out = _aggregate_krr(json_path, min_severity="WARNING")
+	assert len(hr_out) == 1
+	assert len(comment_out) == 1
+	rec = next(iter(hr_out.values()))
 	assert rec.req_cpu_cores == 0.8
 	assert rec.req_mem_bytes == 1048576
 	assert rec.lim_cpu_cores == 1.0
 
 
 def test_infer_namespace_from_path() -> None:
+	# Intended behavior: infer namespaces from common repo layouts.
 	repo_root = Path("/repo")
 	assert _infer_namespace_from_path(repo_root, Path("/repo/apps/media/app/hr.yaml")) == "media"
 	assert _infer_namespace_from_path(repo_root, Path("/repo/namespaces/prod/helmrelease.yaml")) == "prod"
@@ -81,6 +85,7 @@ def test_infer_namespace_from_path() -> None:
 
 
 def test_git_url_helpers_and_masking() -> None:
+	# Intended behavior: normalize URLs and redact secrets in git args.
 	assert (
 		_normalize_repo_url("org/repo", git_base_url="https://forgejo.example.com")
 		== "https://forgejo.example.com/org/repo.git"
