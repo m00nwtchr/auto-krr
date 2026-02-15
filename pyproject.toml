@@ -9,7 +9,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0.0"]
+dev = ["pytest>=8.0.0", "pytest-cov>=5.0.0"]
 
 [project.scripts]
 auto-krr = "auto_krr.cli:main"
