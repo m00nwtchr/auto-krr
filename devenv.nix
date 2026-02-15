@@ -23,7 +23,10 @@
     lsp.package = pkgs.ty;
     uv = {
       enable = true;
-      sync.enable = true;
+      sync = {
+        enable = true;
+        extras = [ "dev" ];
+      };
     };
     venv.enable = true;
   };
