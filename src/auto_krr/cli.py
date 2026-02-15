@@ -28,7 +28,8 @@ from .git_utils import (
 from .comment_targets import _find_krr_comment_targets
 from .hr import _hr_ref_from_doc, _infer_namespace_from_path, _is_app_template_hr, _is_helmrelease
 from .krr import _aggregate_krr
-from .patching import _apply_to_hr_doc, _apply_to_resources_map
+from .patching import HELM_VALUES_CONFIGS, _apply_to_resources_map
+from .resources_matchers import CommentResourcesMatcher, HelmValuesResourcesMatcher, ResourcesMatcher, TargetMatch
 from .types import CommentTargetKey, CommentTargetLoc, ForgejoRepo, HrDocLoc, HrRef, RecommendedResources, TargetKey, YamlDocBundle
 from .yaml_utils import _dump_all_yaml_docs, _read_all_yaml_docs
 
@@ -231,20 +232,6 @@ def _build_hr_index(
 	return hr_index, hr_index_by_name, comment_index
 
 
-def _get_by_path(doc: object, path: List[object]) -> Optional[object]:
-	cur: object = doc
-	for part in path:
-		if isinstance(part, int):
-			if not isinstance(cur, list) or part >= len(cur):
-				return None
-			cur = cur[part]
-		else:
-			if not isinstance(cur, CommentedMap) or part not in cur:
-				return None
-			cur = cur[part]
-	return cur
-
-
 def _apply_krr_to_repo(
 	repo_root: Path,
 	krr_map: Dict[TargetKey, RecommendedResources],
@@ -277,108 +264,166 @@ def _apply_krr_to_repo(
 		changed_files[fp] = (raw, docs, yaml)
 		return raw, docs, yaml
 
-	for target, rec in krr_map.items():
-		locs = hr_index.get(target.hr)
+	helm_values_matcher = HelmValuesResourcesMatcher(
+		hr_index=hr_index,
+		hr_index_by_name=hr_index_by_name,
+		no_name_fallback=no_name_fallback,
+		config=HELM_VALUES_CONFIGS["app-template"],
+	)
+	comment_matcher = CommentResourcesMatcher(comment_index=comment_index, repo_root=repo_root)
 
-		if not locs and not no_name_fallback:
-			cands = hr_index_by_name.get(target.hr.name, [])
-			if len(cands) == 1:
-				locs = cands
-				print(f"NOTE: matched {target.hr.namespace}/{target.hr.name} by name-only (manifest likely missing metadata.namespace).")
-			else:
-				locs = None
+	total_changed_targets += _apply_with_matcher(
+		matcher=helm_values_matcher,
+		rec_map=krr_map,
+		ensure_loaded=_ensure_loaded,
+		only_missing=only_missing,
+		repo_root=repo_root,
+		unmatched=unmatched,
+		updated=updated,
+		skipped=skipped,
+	)
 
-		if not locs:
-			unmatched.append(f"{target.hr.namespace}/{target.hr.name} controller={target.controller} container={target.container}")
-			continue
+	total_changed_targets += _apply_with_matcher(
+		matcher=comment_matcher,
+		rec_map=comment_map,
+		ensure_loaded=_ensure_loaded,
+		only_missing=only_missing,
+		repo_root=repo_root,
+		unmatched=None,
+		updated=updated,
+		skipped=skipped,
+	)
 
-		target_changed = False
-		target_notes: List[str] = []
-		for loc in locs:
-			loaded = _ensure_loaded(loc.path)
-			if loaded is None:
-				target_notes.append(f"yaml read failed @ {loc.path.relative_to(repo_root)}")
-				continue
-			raw, docs, yaml = loaded
-			doc = docs[loc.doc_index]
-			if not isinstance(doc, CommentedMap):
-				continue
+	return changed_files, total_changed_targets, unmatched, {"updated": updated, "skipped": skipped}
 
-			changed, notes = _apply_to_hr_doc(
-				doc,
-				target=target,
-				rec=rec,
-				only_missing=only_missing,
-			)
 
-			if notes:
-				print(f"- {target.hr.namespace}/{target.hr.name} controller={target.controller} container={target.container} @ {loc.path.relative_to(repo_root)}")
-				for n in notes:
-					print(f"	{n}")
-				target_notes.extend(notes)
+def _apply_with_matcher(
+	*,
+	matcher: ResourcesMatcher,
+	rec_map: Dict[object, RecommendedResources],
+	ensure_loaded,
+	only_missing: bool,
+	repo_root: Path,
+	unmatched: Optional[List[str]],
+	updated: List[str],
+	skipped: List[str],
+) -> int:
+	changed_targets = 0
 
-			if changed:
-				total_changed_targets += 1
-				target_changed = True
-		target_id = f"{target.hr.namespace}/{target.hr.name} controller={target.controller} container={target.container}"
-		if target_changed:
-			updated.append(target_id)
-		elif target_notes:
-			reason = "; ".join(target_notes)
-			skipped.append(f"{target_id} — {reason}")
-		else:
-			skipped.append(f"{target_id} — no changes needed")
+	for target_match in matcher.iter_targets(rec_map):
+		target = target_match.target_key
+		target_id = matcher.describe_target(target)
 
-	for target, locs in comment_index.items():
-		rec = comment_map.get(target)
-		target_id = f"comment controller={target.controller} container={target.container}"
-
-		if rec is None:
+		if target_match.rec is None:
 			skipped.append(f"{target_id} — no KRR match")
 			continue
 
-		target_changed = False
-		target_notes: List[str] = []
-		for loc in locs:
-			loaded = _ensure_loaded(loc.path)
-			if loaded is None:
-				target_notes.append(f"yaml read failed @ {loc.path.relative_to(repo_root)}")
-				continue
-			raw, docs, yaml = loaded
-			doc = docs[loc.doc_index]
-			if not isinstance(doc, CommentedMap):
-				target_notes.append(f"SKIP: document is not a mapping @ {loc.path.relative_to(repo_root)}")
-				continue
-			resources = _get_by_path(doc, loc.resources_path)
-			if not isinstance(resources, CommentedMap):
-				target_notes.append(f"SKIP: resources is not a mapping @ {loc.path.relative_to(repo_root)}")
-				continue
+		if not target_match.match or not target_match.match.locs:
+			if unmatched is not None:
+				unmatched.append(target_id)
+			else:
+				skipped.append(f"{target_id} — no matching resources")
+			continue
 
-			changed, notes = _apply_to_resources_map(
-				resources,
-				rec=rec,
-				only_missing=only_missing,
-			)
+		for note in target_match.match.info_notes:
+			print(note)
 
-			if notes:
-				print(f"- {target_id} @ {loc.path.relative_to(repo_root)}")
-				for n in notes:
-					print(f"\t{n}")
-				target_notes.extend(notes)
+		outcomes = _apply_to_target_matches(
+			matcher=matcher,
+			target_match=target_match,
+			target_id=target_id,
+			ensure_loaded=ensure_loaded,
+			only_missing=only_missing,
+			repo_root=repo_root,
+		)
 
-			if changed:
-				total_changed_targets += 1
-				target_changed = True
-
-		if target_changed:
-			updated.append(target_id)
-		elif target_notes:
-			reason = "; ".join(target_notes)
-			skipped.append(f"{target_id} — {reason}")
+		if matcher.summarize_per_match:
+			for outcome in outcomes:
+				if outcome.changed:
+					updated.append(outcome.label)
+					changed_targets += 1
+				elif outcome.notes:
+					reason = "; ".join(outcome.notes)
+					skipped.append(f"{outcome.label} — {reason}")
+				else:
+					skipped.append(f"{outcome.label} — no changes needed")
 		else:
-			skipped.append(f"{target_id} — no changes needed")
+			target_changed = any(outcome.changed for outcome in outcomes)
+			target_notes = []
+			for outcome in outcomes:
+				target_notes.extend(outcome.notes)
+			if target_changed:
+				updated.append(target_id)
+				changed_targets += 1
+			elif target_notes:
+				reason = "; ".join(target_notes)
+				skipped.append(f"{target_id} — {reason}")
+			else:
+				skipped.append(f"{target_id} — no changes needed")
 
-	return changed_files, total_changed_targets, unmatched, {"updated": updated, "skipped": skipped}
+	return changed_targets
+
+
+class _MatchOutcome:
+	def __init__(self, label: str, changed: bool, notes: List[str]) -> None:
+		self.label = label
+		self.changed = changed
+		self.notes = notes
+
+
+def _apply_to_target_matches(
+	*,
+	matcher: ResourcesMatcher,
+	target_match: TargetMatch,
+	target_id: str,
+	ensure_loaded,
+	only_missing: bool,
+	repo_root: Path,
+) -> List[_MatchOutcome]:
+	outcomes: List[_MatchOutcome] = []
+
+	for loc in target_match.match.locs:
+		loaded = ensure_loaded(loc.path)
+		if loaded is None:
+			label = target_id
+			notes = [f"yaml read failed @ {loc.path.relative_to(repo_root)}"]
+			outcomes.append(_MatchOutcome(label, False, notes))
+			continue
+		raw, docs, yaml = loaded
+		doc = docs[loc.doc_index]
+		if not isinstance(doc, CommentedMap):
+			label = target_id
+			notes = [f"SKIP: document is not a mapping @ {loc.path.relative_to(repo_root)}"]
+			outcomes.append(_MatchOutcome(label, False, notes))
+			continue
+
+		label = matcher.describe_match(target_match.target_key, doc)
+		resources, _, resolver_notes = matcher.resolve_resources(doc, target_match.target_key, loc)
+		if resolver_notes:
+			print(f"- {label} @ {loc.path.relative_to(repo_root)}")
+			for n in resolver_notes:
+				print(f"\t{n}")
+		combined_notes = list(resolver_notes)
+
+		if resources is None:
+			outcomes.append(_MatchOutcome(label, False, combined_notes))
+			continue
+
+		changed, res_notes = _apply_to_resources_map(
+			resources,
+			rec=target_match.rec,
+			only_missing=only_missing,
+		)
+
+		if res_notes:
+			print(f"- {label} @ {loc.path.relative_to(repo_root)}")
+			for n in res_notes:
+				print(f"\t{n}")
+			combined_notes.extend(res_notes)
+
+		outcomes.append(_MatchOutcome(label, changed, combined_notes))
+
+	return outcomes
 
 
 def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[str]) -> str:

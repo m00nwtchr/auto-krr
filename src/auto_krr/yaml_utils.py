@@ -38,3 +38,16 @@ def _insert_if_missing(m: CommentedMap, key: str, value: Any, *, after_keys: Lis
 		if ak in m:
 			insert_at = list(m.keys()).index(ak) + 1
 	m.insert(insert_at, key, value)
+
+
+def _insert_alpha_if_missing(m: CommentedMap, key: str, value: Any) -> None:
+	if key in m:
+		return
+	keys = list(m.keys())
+	insert_at = len(keys)
+	key_str = str(key)
+	for idx, existing in enumerate(keys):
+		if str(existing) > key_str:
+			insert_at = idx
+			break
+	m.insert(insert_at, key, value)

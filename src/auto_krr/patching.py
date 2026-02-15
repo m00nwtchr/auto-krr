@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from ruamel.yaml.comments import CommentedMap
 
 from .types import RecommendedResources, TargetKey
-from .yaml_utils import _insert_if_missing
+from .yaml_utils import _insert_alpha_if_missing, _insert_if_missing
 
 
 def _cpu_qty(cores: float) -> str:
@@ -69,60 +70,15 @@ def _apply_to_hr_doc(
 	rec: RecommendedResources,
 	only_missing: bool,
 ) -> Tuple[bool, List[str]]:
-	changed = False
-	notes: List[str] = []
-
-	spec = doc.get("spec")
-	if not isinstance(spec, CommentedMap):
-		spec = CommentedMap()
-		doc["spec"] = spec
-		changed = True
-
-	values = spec.get("values")
-	if not isinstance(values, CommentedMap):
-		values = CommentedMap()
-		spec["values"] = values
-		changed = True
-
-	controllers = values.get("controllers")
-	if not isinstance(controllers, CommentedMap):
-		controllers = CommentedMap()
-		values["controllers"] = controllers
-		changed = True
-
-	ctrl_key = _pick_controller_key(controllers, target.controller, target.hr.name)
-	if ctrl_key is None:
-		notes.append(f"SKIP: controller {target.controller!r} not found (controllers: {[str(k) for k in controllers.keys()]})")
+	resources, changed, notes = _resolve_helm_values_resources(
+		doc,
+		target=target,
+		create_missing=True,
+		config=HELM_VALUES_CONFIGS["app-template"],
+	)
+	if resources is None:
 		return False, notes
 
-	ctrl_def = controllers.get(ctrl_key)
-	if not isinstance(ctrl_def, CommentedMap):
-		ctrl_def = CommentedMap()
-		controllers[ctrl_key] = ctrl_def
-		changed = True
-
-	containers = ctrl_def.get("containers")
-	if not isinstance(containers, CommentedMap):
-		containers = CommentedMap()
-		_insert_if_missing(ctrl_def, "containers", containers, after_keys=["pod", "cronjob", "statefulset", "deployment", "type"])
-		changed = True
-
-	ctr_key = _pick_container_key(containers, target.container)
-	if ctr_key is None:
-		notes.append(f"SKIP: container {target.container!r} not found (containers: {[str(k) for k in containers.keys()]})")
-		return False, notes
-
-	ctr_def = containers.get(ctr_key)
-	if not isinstance(ctr_def, CommentedMap):
-		ctr_def = CommentedMap()
-		containers[ctr_key] = ctr_def
-		changed = True
-
-	resources = ctr_def.get("resources")
-	if not isinstance(resources, CommentedMap):
-		resources = CommentedMap()
-		_insert_if_missing(ctr_def, "resources", resources, after_keys=["securityContext", "probes", "envFrom", "env", "args", "command", "image"])
-		changed = True
 	resource_changed, resource_notes = _apply_to_resources_map(
 		resources,
 		rec=rec,
@@ -134,6 +90,107 @@ def _apply_to_hr_doc(
 		notes.extend(resource_notes)
 
 	return changed, notes
+
+
+@dataclass(frozen=True)
+class HelmValuesConfig:
+	controllers_path: List[str]
+	containers_key: str
+	resources_key: str
+	containers_after_keys: List[str]
+
+
+HELM_VALUES_CONFIGS = {
+	"app-template": HelmValuesConfig(
+		controllers_path=["spec", "values", "controllers"],
+		containers_key="containers",
+		resources_key="resources",
+		containers_after_keys=["pod", "cronjob", "statefulset", "deployment", "type"],
+	),
+}
+
+
+def _resolve_helm_values_resources(
+	doc: CommentedMap,
+	*,
+	target: TargetKey,
+	create_missing: bool,
+	config: HelmValuesConfig,
+) -> Tuple[Optional[CommentedMap], bool, List[str]]:
+	changed = False
+	notes: List[str] = []
+
+	controllers, path_changed, path_notes = _resolve_map_path(
+		doc,
+		path=config.controllers_path,
+		create_missing=create_missing,
+	)
+	if path_notes:
+		return None, changed or path_changed, path_notes
+	changed = changed or path_changed
+	if controllers is None:
+		return None, changed, ["SKIP: spec.values.controllers is not a mapping"]
+
+	ctrl_key = _pick_controller_key(controllers, target.controller, target.hr.name)
+	if ctrl_key is None:
+		notes.append(f"SKIP: controller {target.controller!r} not found (controllers: {[str(k) for k in controllers.keys()]})")
+		return None, changed, notes
+
+	ctrl_def = controllers.get(ctrl_key)
+	if not isinstance(ctrl_def, CommentedMap):
+		if not create_missing:
+			return None, changed, ["SKIP: controller definition is not a mapping"]
+		ctrl_def = CommentedMap()
+		controllers[ctrl_key] = ctrl_def
+		changed = True
+
+	containers = ctrl_def.get(config.containers_key)
+	if not isinstance(containers, CommentedMap):
+		return None, changed, [f"SKIP: {config.containers_key} is not a mapping"]
+
+	ctr_key = _pick_container_key(containers, target.container)
+	if ctr_key is None:
+		notes.append(f"SKIP: container {target.container!r} not found (containers: {[str(k) for k in containers.keys()]})")
+		return None, changed, notes
+
+	ctr_def = containers.get(ctr_key)
+	if not isinstance(ctr_def, CommentedMap):
+		if not create_missing:
+			return None, changed, ["SKIP: container definition is not a mapping"]
+		ctr_def = CommentedMap()
+		containers[ctr_key] = ctr_def
+		changed = True
+
+	resources = ctr_def.get(config.resources_key)
+	if not isinstance(resources, CommentedMap):
+		if not create_missing:
+			return None, changed, [f"SKIP: {config.resources_key} is not a mapping"]
+		resources = CommentedMap()
+		_insert_alpha_if_missing(ctr_def, config.resources_key, resources)
+		changed = True
+
+	return resources, changed, notes
+
+
+def _resolve_map_path(
+	doc: CommentedMap,
+	*,
+	path: List[str],
+	create_missing: bool,
+) -> Tuple[Optional[CommentedMap], bool, List[str]]:
+	changed = False
+	cur: CommentedMap = doc
+	for idx, key in enumerate(path):
+		label = ".".join(path[: idx + 1])
+		next_val = cur.get(key)
+		if not isinstance(next_val, CommentedMap):
+			if not create_missing:
+				return None, changed, [f"SKIP: {label} is not a mapping"]
+			next_val = CommentedMap()
+			cur[key] = next_val
+			changed = True
+		cur = next_val
+	return cur, changed, []
 
 
 def _apply_to_resources_map(
