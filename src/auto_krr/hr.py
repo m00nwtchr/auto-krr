@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from .types import HrRef
+from .types import ResourceRef
 
 
 def _is_helmrelease(doc: Any) -> bool:
@@ -15,13 +15,14 @@ def _is_helmrelease(doc: Any) -> bool:
 	return api.startswith("helm.toolkit.fluxcd.io/")
 
 
-def _hr_ref_from_doc(doc: Dict[str, Any]) -> HrRef:
+def _resource_ref_from_doc(doc: Dict[str, Any]) -> ResourceRef:
 	meta = doc.get("metadata") or {}
 	name = str(meta.get("name") or "")
 	ns = str(meta.get("namespace") or "")
 	if not ns:
 		ns = "default"
-	return HrRef(namespace=ns, name=name)
+	kind = str(doc.get("kind") or "")
+	return ResourceRef(kind=kind, namespace=ns, name=name)
 
 
 def _infer_namespace_from_path(repo_root: Path, file_path: Path) -> Optional[str]:

@@ -9,12 +9,12 @@ from auto_krr.yaml_utils import _read_all_yaml_docs
 def test_find_krr_comment_targets_trivy_operator() -> None:
 	# Intended behavior: only comments attached to the resources key should be matched.
 	path = Path(__file__).parent / "fixtures" / "manifests" / "helmrelease_trivy_operator_comments.yaml"
-	_, docs, _ = _read_all_yaml_docs(path)
+	raw, docs, _ = _read_all_yaml_docs(path)
 	assert len(docs) == 1
 	doc = docs[0]
 	assert isinstance(doc, CommentedMap)
 
-	matches = _find_krr_comment_targets(doc)
+	matches = _find_krr_comment_targets(doc, raw_lines=raw.splitlines())
 	assert {(m.controller, m.container) for m in matches} == {
 		("trivy-server", "trivy-server"),
 		("trivy-operator", "trivy-operator"),
@@ -27,22 +27,34 @@ def test_find_krr_comment_targets_trivy_operator() -> None:
 def test_find_krr_comment_targets_trailing_comment() -> None:
 	# Intended behavior: trailing comments after the resources block are invalid.
 	path = Path(__file__).parent / "fixtures" / "manifests" / "helmrelease_comment_trailing.yaml"
-	_, docs, _ = _read_all_yaml_docs(path)
+	raw, docs, _ = _read_all_yaml_docs(path)
 	assert len(docs) == 1
 	doc = docs[0]
 	assert isinstance(doc, CommentedMap)
 
-	matches = _find_krr_comment_targets(doc)
+	matches = _find_krr_comment_targets(doc, raw_lines=raw.splitlines())
 	assert matches == []
+
+
+def test_find_krr_comment_targets_above_resources() -> None:
+	# Intended behavior: comments directly above the resources key are valid.
+	path = Path(__file__).parent / "fixtures" / "manifests" / "helmrelease_comment_above_resources.yaml"
+	raw, docs, _ = _read_all_yaml_docs(path)
+	assert len(docs) == 1
+	doc = docs[0]
+	assert isinstance(doc, CommentedMap)
+
+	matches = _find_krr_comment_targets(doc, raw_lines=raw.splitlines())
+	assert {(m.controller, m.container) for m in matches} == {("trivy-server", "trivy-server")}
 
 
 def test_find_krr_comment_targets_prev_key_comment() -> None:
 	# Intended behavior: comments on the previous key are invalid.
 	path = Path(__file__).parent / "fixtures" / "manifests" / "helmrelease_comment_prev_key.yaml"
-	_, docs, _ = _read_all_yaml_docs(path)
+	raw, docs, _ = _read_all_yaml_docs(path)
 	assert len(docs) == 1
 	doc = docs[0]
 	assert isinstance(doc, CommentedMap)
 
-	matches = _find_krr_comment_targets(doc)
+	matches = _find_krr_comment_targets(doc, raw_lines=raw.splitlines())
 	assert matches == []

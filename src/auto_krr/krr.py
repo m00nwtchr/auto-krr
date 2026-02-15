@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
-from .types import CommentTargetKey, RecommendedResources, TargetKey, HrRef
+from .types import RecommendedResources, ResourceRef, TargetKey
 
 
 def _safe_float(v: Any) -> Optional[float]:
@@ -58,11 +58,10 @@ def _aggregate_krr(
 	json_path: Path,
 	*,
 	min_severity: str,
-) -> Tuple[Dict[TargetKey, RecommendedResources], Dict[CommentTargetKey, RecommendedResources]]:
+) -> Dict[TargetKey, RecommendedResources]:
 	data = json.loads(json_path.read_text(encoding="utf-8"))
 	scans = data.get("scans") or []
-	hr_out: Dict[TargetKey, RecommendedResources] = {}
-	comment_out: Dict[CommentTargetKey, RecommendedResources] = {}
+	out: Dict[TargetKey, RecommendedResources] = {}
 
 	severity_rank = {
 		"UNKNOWN": -1,
@@ -112,29 +111,17 @@ def _aggregate_krr(
 		):
 			continue
 
-		comment_key = CommentTargetKey(controller=controller, container=container)
-		prev = comment_out.get(comment_key)
+		res_ref = (
+			ResourceRef(kind="HelmRelease", namespace=str(hr_ns), name=str(hr_name)) if hr_name and hr_ns else None
+		)
+		target_key = TargetKey(resource=res_ref, controller=controller, container=container)
+		prev = out.get(target_key)
 		if prev is None:
-			comment_out[comment_key] = rec
+			out[target_key] = rec
 		else:
 			prev.req_cpu_cores = _merge_max(prev.req_cpu_cores, rec.req_cpu_cores)
 			prev.req_mem_bytes = _merge_max(prev.req_mem_bytes, rec.req_mem_bytes)
 			prev.lim_cpu_cores = _merge_max(prev.lim_cpu_cores, rec.lim_cpu_cores)
 			prev.lim_mem_bytes = _merge_max(prev.lim_mem_bytes, rec.lim_mem_bytes)
 
-		if hr_name and hr_ns:
-			hr_key = TargetKey(
-				hr=HrRef(namespace=str(hr_ns), name=str(hr_name)),
-				controller=controller,
-				container=container,
-			)
-			prev = hr_out.get(hr_key)
-			if prev is None:
-				hr_out[hr_key] = rec
-			else:
-				prev.req_cpu_cores = _merge_max(prev.req_cpu_cores, rec.req_cpu_cores)
-				prev.req_mem_bytes = _merge_max(prev.req_mem_bytes, rec.req_mem_bytes)
-				prev.lim_cpu_cores = _merge_max(prev.lim_cpu_cores, rec.lim_cpu_cores)
-				prev.lim_mem_bytes = _merge_max(prev.lim_mem_bytes, rec.lim_mem_bytes)
-
-	return hr_out, comment_out
+	return out

@@ -7,7 +7,7 @@ from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 from ruamel.yaml.comments import CommentedMap
 
 from .patching import HelmValuesConfig, _resolve_helm_values_resources
-from .types import CommentTargetKey, CommentTargetLoc, HrDocLoc, HrRef, RecommendedResources
+from .types import CommentTargetLoc, HrDocLoc, RecommendedResources, ResourceRef, TargetKey
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,7 @@ class TargetMatch:
 	target_key: object
 	rec: Optional[RecommendedResources]
 	match: Optional[MatchResult]
+	matched_targets: Optional[List[TargetKey]] = None
 
 
 class ResourcesMatcher(Protocol):
@@ -59,7 +60,7 @@ class HelmValuesResourcesMatcher:
 	def __init__(
 		self,
 		*,
-		hr_index: Dict[HrRef, List[HrDocLoc]],
+		hr_index: Dict[ResourceRef, List[HrDocLoc]],
 		hr_index_by_name: Dict[str, List[HrDocLoc]],
 		no_name_fallback: bool,
 		config: HelmValuesConfig,
@@ -71,15 +72,19 @@ class HelmValuesResourcesMatcher:
 
 	def iter_targets(self, rec_map: Dict[object, RecommendedResources]) -> Iterable[TargetMatch]:
 		for target, rec in rec_map.items():
-			locs = self._hr_index.get(target.hr)
+			if not isinstance(target, TargetKey) or target.resource is None:
+				continue
+			if target.resource.kind != "HelmRelease":
+				continue
+			locs = self._hr_index.get(target.resource)
 			info_notes: List[str] = []
 
 			if not locs and not self._no_name_fallback:
-				cands = self._hr_index_by_name.get(target.hr.name, [])
+				cands = self._hr_index_by_name.get(target.resource.name, [])
 				if len(cands) == 1:
 					locs = cands
 					info_notes.append(
-						f"NOTE: matched {target.hr.namespace}/{target.hr.name} by name-only (manifest likely missing metadata.namespace)."
+						f"NOTE: matched {target.resource.namespace}/{target.resource.name} by name-only (manifest likely missing metadata.namespace)."
 					)
 				else:
 					locs = None
@@ -94,10 +99,14 @@ class HelmValuesResourcesMatcher:
 
 	def describe_target(self, target_key: object) -> str:
 		target = target_key
+		if not isinstance(target, TargetKey) or target.resource is None:
+			raise ValueError("helm-values matcher requires TargetKey with resource set")
+		if target.resource.kind != "HelmRelease":
+			raise ValueError("helm-values matcher requires HelmRelease targets")
 		return _format_match_label(
-			kind="HelmRelease",
-			namespace=target.hr.namespace,
-			name=target.hr.name,
+			kind=target.resource.kind,
+			namespace=target.resource.namespace,
+			name=target.resource.name,
 			controller=target.controller,
 			container=target.container,
 			matcher=self.name,
@@ -105,11 +114,15 @@ class HelmValuesResourcesMatcher:
 
 	def describe_match(self, target_key: object, doc: CommentedMap) -> str:
 		target = target_key
+		if not isinstance(target, TargetKey) or target.resource is None:
+			raise ValueError("helm-values matcher requires TargetKey with resource set")
+		if target.resource.kind != "HelmRelease":
+			raise ValueError("helm-values matcher requires HelmRelease targets")
 		kind, namespace, name = _resource_identity(doc)
 		return _format_match_label(
-			kind=kind or "HelmRelease",
-			namespace=namespace or target.hr.namespace,
-			name=name or target.hr.name,
+			kind=kind or target.resource.kind,
+			namespace=namespace or target.resource.namespace,
+			name=name or target.resource.name,
 			controller=target.controller,
 			container=target.container,
 			matcher=self.name,
@@ -122,6 +135,10 @@ class HelmValuesResourcesMatcher:
 		match: ResourcesMatch,
 	) -> Tuple[Optional[CommentedMap], bool, List[str]]:
 		target = target_key
+		if not isinstance(target, TargetKey) or target.resource is None:
+			raise ValueError("helm-values matcher requires TargetKey with resource set")
+		if target.resource.kind != "HelmRelease":
+			raise ValueError("helm-values matcher requires HelmRelease targets")
 		return _resolve_helm_values_resources(doc, target=target, create_missing=True, config=self._config)
 
 
@@ -132,31 +149,39 @@ class HeuristicResourcesMatcher:
 	def __init__(
 		self,
 		*,
-		hr_index: Dict[HrRef, List[HrDocLoc]],
+		hr_index: Dict[ResourceRef, List[HrDocLoc]],
 		hr_index_by_name: Dict[str, List[HrDocLoc]],
 		no_name_fallback: bool,
 	) -> None:
 		self._hr_index = hr_index
 		self._hr_index_by_name = hr_index_by_name
 		self._no_name_fallback = no_name_fallback
-		self._target_counts_by_hr: Dict[HrRef, int] = {}
+		self._target_counts_by_resource: Dict[ResourceRef, int] = {}
 
 	def iter_targets(self, rec_map: Dict[object, RecommendedResources]) -> Iterable[TargetMatch]:
 		# TODO: heuristic matching for resources blocks when no chart config is available.
-		self._target_counts_by_hr = {}
+		self._target_counts_by_resource = {}
 		for target in rec_map.keys():
-			self._target_counts_by_hr[target.hr] = self._target_counts_by_hr.get(target.hr, 0) + 1
+			if not isinstance(target, TargetKey) or target.resource is None:
+				continue
+			if target.resource.kind != "HelmRelease":
+				continue
+			self._target_counts_by_resource[target.resource] = self._target_counts_by_resource.get(target.resource, 0) + 1
 
 		for target, rec in rec_map.items():
-			locs = self._hr_index.get(target.hr)
+			if not isinstance(target, TargetKey) or target.resource is None:
+				continue
+			if target.resource.kind != "HelmRelease":
+				continue
+			locs = self._hr_index.get(target.resource)
 			info_notes: List[str] = []
 
 			if not locs and not self._no_name_fallback:
-				cands = self._hr_index_by_name.get(target.hr.name, [])
+				cands = self._hr_index_by_name.get(target.resource.name, [])
 				if len(cands) == 1:
 					locs = cands
 					info_notes.append(
-						f"NOTE: matched {target.hr.namespace}/{target.hr.name} by name-only (manifest likely missing metadata.namespace)."
+						f"NOTE: matched {target.resource.namespace}/{target.resource.name} by name-only (manifest likely missing metadata.namespace)."
 					)
 				else:
 					locs = None
@@ -171,10 +196,14 @@ class HeuristicResourcesMatcher:
 
 	def describe_target(self, target_key: object) -> str:
 		target = target_key
+		if not isinstance(target, TargetKey) or target.resource is None:
+			raise ValueError("helm-values heuristic matcher requires TargetKey with resource set")
+		if target.resource.kind != "HelmRelease":
+			raise ValueError("helm-values heuristic matcher requires HelmRelease targets")
 		return _format_match_label(
-			kind="HelmRelease",
-			namespace=target.hr.namespace,
-			name=target.hr.name,
+			kind=target.resource.kind,
+			namespace=target.resource.namespace,
+			name=target.resource.name,
 			controller=target.controller,
 			container=target.container,
 			matcher=self.name,
@@ -182,11 +211,15 @@ class HeuristicResourcesMatcher:
 
 	def describe_match(self, target_key: object, doc: CommentedMap) -> str:
 		target = target_key
+		if not isinstance(target, TargetKey) or target.resource is None:
+			raise ValueError("helm-values heuristic matcher requires TargetKey with resource set")
+		if target.resource.kind != "HelmRelease":
+			raise ValueError("helm-values heuristic matcher requires HelmRelease targets")
 		kind, namespace, name = _resource_identity(doc)
 		return _format_match_label(
-			kind=kind or "HelmRelease",
-			namespace=namespace or target.hr.namespace,
-			name=name or target.hr.name,
+			kind=kind or target.resource.kind,
+			namespace=namespace or target.resource.namespace,
+			name=name or target.resource.name,
 			controller=target.controller,
 			container=target.container,
 			matcher=self.name,
@@ -199,7 +232,11 @@ class HeuristicResourcesMatcher:
 		match: ResourcesMatch,
 	) -> Tuple[Optional[CommentedMap], bool, List[str]]:
 		target = target_key
-		count = self._target_counts_by_hr.get(target.hr, 0)
+		if not isinstance(target, TargetKey) or target.resource is None:
+			raise ValueError("helm-values heuristic matcher requires TargetKey with resource set")
+		if target.resource.kind != "HelmRelease":
+			raise ValueError("helm-values heuristic matcher requires HelmRelease targets")
+		count = self._target_counts_by_resource.get(target.resource, 0)
 		if count != 1:
 			return None, False, ["SKIP: heuristic requires a single workload for this HelmRelease"]
 
@@ -222,13 +259,27 @@ class CommentResourcesMatcher:
 	name = "comment"
 	summarize_per_match = True
 
-	def __init__(self, *, comment_index: Dict[CommentTargetKey, List[CommentTargetLoc]], repo_root: Path) -> None:
+	def __init__(self, *, comment_index: Dict[TargetKey, List[CommentTargetLoc]], repo_root: Path) -> None:
 		self._comment_index = comment_index
 		self._repo_root = repo_root
 
 	def iter_targets(self, rec_map: Dict[object, RecommendedResources]) -> Iterable[TargetMatch]:
+		rec_index: Dict[Tuple[str, str], List[TargetKey]] = {}
+		rec_bucket: Dict[Tuple[str, str], List[RecommendedResources]] = {}
+		for key, rec in rec_map.items():
+			if not isinstance(key, TargetKey):
+				continue
+			bucket_key = (key.controller, key.container)
+			rec_index.setdefault(bucket_key, []).append(key)
+			rec_bucket.setdefault(bucket_key, []).append(rec)
+
 		for target, locs in self._comment_index.items():
-			rec = rec_map.get(target)
+			if not isinstance(target, TargetKey):
+				continue
+			bucket_key = (target.controller, target.container)
+			recs = rec_bucket.get(bucket_key, [])
+			rec = _merge_recs(recs) if recs else None
+			matched_targets = rec_index.get(bucket_key, [])
 			match = MatchResult(
 				locs=[
 					ResourcesMatch(path=loc.path, doc_index=loc.doc_index, resources_path=loc.resources_path)
@@ -236,10 +287,21 @@ class CommentResourcesMatcher:
 				],
 				info_notes=[],
 			)
-			yield TargetMatch(target_key=target, rec=rec, match=match)
+			yield TargetMatch(target_key=target, rec=rec, match=match, matched_targets=matched_targets)
 
 	def describe_target(self, target_key: object) -> str:
 		target = target_key
+		if not isinstance(target, TargetKey):
+			raise ValueError("comment matcher requires TargetKey")
+		if target.resource:
+			return _format_match_label(
+				kind=target.resource.kind,
+				namespace=target.resource.namespace,
+				name=target.resource.name,
+				controller=target.controller,
+				container=target.container,
+				matcher=self.name,
+			)
 		return _format_match_label(
 			kind="resource",
 			namespace="unknown",
@@ -303,6 +365,24 @@ def _resource_identity(doc: CommentedMap) -> Tuple[str, str, str]:
 	name = str(meta.get("name") or "")
 	namespace = str(meta.get("namespace") or "")
 	return kind, namespace, name
+
+
+def _merge_max(a: Optional[float], b: Optional[float]) -> Optional[float]:
+	if a is None:
+		return b
+	if b is None:
+		return a
+	return max(a, b)
+
+
+def _merge_recs(recs: List[RecommendedResources]) -> RecommendedResources:
+	out = RecommendedResources()
+	for rec in recs:
+		out.req_cpu_cores = _merge_max(out.req_cpu_cores, rec.req_cpu_cores)
+		out.req_mem_bytes = _merge_max(out.req_mem_bytes, rec.req_mem_bytes)
+		out.lim_cpu_cores = _merge_max(out.lim_cpu_cores, rec.lim_cpu_cores)
+		out.lim_mem_bytes = _merge_max(out.lim_mem_bytes, rec.lim_mem_bytes)
+	return out
 
 
 def _format_match_label(

@@ -1,7 +1,7 @@
 from ruamel.yaml.comments import CommentedMap
 
 from auto_krr.patching import _apply_to_hr_doc, _cpu_qty, _mem_qty, _pick_container_key, _pick_controller_key
-from auto_krr.types import HrRef, RecommendedResources, TargetKey
+from auto_krr.types import RecommendedResources, ResourceRef, TargetKey
 
 
 def test_cpu_mem_qty_rounding() -> None:
@@ -45,7 +45,7 @@ def test_apply_to_hr_doc_only_missing() -> None:
 	values = CommentedMap({"controllers": controllers})
 	spec = CommentedMap({"values": values})
 	doc = CommentedMap({"spec": spec})
-	target = TargetKey(hr=HrRef(namespace="default", name="app"), controller="main", container="app")
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="app"), controller="main", container="app")
 	rec = RecommendedResources(req_cpu_cores=0.5, req_mem_bytes=1024 * 1024)
 
 	changed, notes = _apply_to_hr_doc(doc, target=target, rec=rec, only_missing=True)
@@ -63,7 +63,7 @@ def test_apply_to_hr_doc_overwrite() -> None:
 	values = CommentedMap({"controllers": controllers})
 	spec = CommentedMap({"values": values})
 	doc = CommentedMap({"spec": spec})
-	target = TargetKey(hr=HrRef(namespace="default", name="app"), controller="main", container="app")
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="app"), controller="main", container="app")
 	rec = RecommendedResources(req_cpu_cores=0.5)
 
 	changed, notes = _apply_to_hr_doc(doc, target=target, rec=rec, only_missing=False)

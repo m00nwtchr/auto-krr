@@ -14,7 +14,7 @@ class CommentTargetMatch:
 	container: str
 
 
-def _find_krr_comment_targets(doc: Any) -> List[CommentTargetMatch]:
+def _find_krr_comment_targets(doc: Any, *, raw_lines: Optional[List[str]] = None) -> List[CommentTargetMatch]:
 	matches: List[CommentTargetMatch] = []
 
 	def _walk(node: Any, path: List[object]) -> None:
@@ -24,6 +24,15 @@ def _find_krr_comment_targets(doc: Any) -> List[CommentTargetMatch]:
 				next_path = [*path, key_str]
 				if key_str == "resources":
 					texts = _comment_texts_for_key(node, key)
+					if not texts and node and list(node.keys())[0] == key:
+						texts = _comment_texts_for_map(node)
+					if not texts and raw_lines is not None:
+						pos = node.lc.key(key)
+						line = pos[0] if isinstance(pos, tuple) else pos
+						if isinstance(line, int) and line > 0:
+							prev = raw_lines[line - 1]
+							if prev.lstrip().startswith("#"):
+								texts = [prev]
 					controller, container = _parse_krr_comment(texts)
 					if controller and container:
 						matches.append(

@@ -2,7 +2,7 @@ from argparse import Namespace
 from pathlib import Path
 
 from auto_krr import cli
-from auto_krr.types import HrRef, RecommendedResources, TargetKey
+from auto_krr.types import RecommendedResources, ResourceRef, TargetKey
 
 
 def _base_args(tmp_path: Path) -> Namespace:
@@ -66,14 +66,14 @@ def test_main_dry_run(monkeypatch, tmp_path: Path) -> None:
 	manifest_path = _write_manifest(tmp_path)
 	args = _base_args(tmp_path)
 
-	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
 	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
 	monkeypatch.setattr(cli, "_parse_args", lambda: args)
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: krr_map)
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 
 	assert cli.main() == 0
@@ -88,7 +88,7 @@ def test_main_no_changes(monkeypatch, tmp_path: Path) -> None:
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: ({}, {}))
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: {})
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 
 	assert cli.main() == 2
@@ -100,14 +100,14 @@ def test_main_write_path(monkeypatch, tmp_path: Path) -> None:
 	args = _base_args(tmp_path)
 	args.write = True
 
-	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
 	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
 	monkeypatch.setattr(cli, "_parse_args", lambda: args)
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: krr_map)
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
 
@@ -129,7 +129,7 @@ def test_main_retries_on_rebase_conflict(monkeypatch, tmp_path: Path) -> None:
 	args.pr = True
 	args.forgejo_token = "t"
 
-	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
 	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
 	call_state = {"calls": 0}
@@ -142,7 +142,7 @@ def test_main_retries_on_rebase_conflict(monkeypatch, tmp_path: Path) -> None:
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: krr_map)
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
 	monkeypatch.setattr(cli, "_maybe_create_pr", _fake_maybe_create_pr)
@@ -159,14 +159,14 @@ def test_main_stops_after_second_rebase_conflict(monkeypatch, tmp_path: Path) ->
 	args.pr = True
 	args.forgejo_token = "t"
 
-	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
 	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
 	monkeypatch.setattr(cli, "_parse_args", lambda: args)
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: krr_map)
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
 	monkeypatch.setattr(cli, "_maybe_create_pr", lambda *_a, **_kw: 3)

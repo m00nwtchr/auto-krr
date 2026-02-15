@@ -131,7 +131,8 @@ def _resolve_helm_values_resources(
 	if controllers is None:
 		return None, changed, ["SKIP: spec.values.controllers is not a mapping"]
 
-	ctrl_key = _pick_controller_key(controllers, target.controller, target.hr.name)
+	resource_name = target.resource.name if target.resource else ""
+	ctrl_key = _pick_controller_key(controllers, target.controller, resource_name)
 	if ctrl_key is None:
 		notes.append(f"SKIP: controller {target.controller!r} not found (controllers: {[str(k) for k in controllers.keys()]})")
 		return None, changed, notes

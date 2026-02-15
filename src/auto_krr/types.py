@@ -9,20 +9,15 @@ from ruamel.yaml.comments import CommentedMap
 
 
 @dataclass(frozen=True)
-class HrRef:
+class ResourceRef:
+	kind: str
 	namespace: str
 	name: str
 
 
 @dataclass(frozen=True)
 class TargetKey:
-	hr: HrRef
-	controller: str
-	container: str
-
-
-@dataclass(frozen=True)
-class CommentTargetKey:
+	resource: Optional[ResourceRef]
 	controller: str
 	container: str
 

@@ -3,7 +3,7 @@ from pathlib import Path
 from ruamel.yaml.comments import CommentedMap
 
 from auto_krr.cli import _apply_krr_to_repo, _build_hr_index, _format_cli_summary, _format_pr_body
-from auto_krr.types import CommentTargetKey, HrRef, RecommendedResources, TargetKey
+from auto_krr.types import RecommendedResources, ResourceRef, TargetKey
 from auto_krr.yaml_utils import _read_all_yaml_docs
 
 
@@ -69,13 +69,12 @@ spec:
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
-	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
-	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
+	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
 	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
 		tmp_path,
-		krr_map,
-		comment_map={},
+		rec_map,
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		comment_index=comment_index,
@@ -118,13 +117,12 @@ spec:
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
-	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
-	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
+	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
 	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
 		tmp_path,
-		krr_map,
-		comment_map={},
+		rec_map,
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		comment_index=comment_index,
@@ -167,14 +165,12 @@ spec:
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
-	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
-	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
-	comment_map = {CommentTargetKey(controller="main", container="app"): RecommendedResources(req_cpu_cores=0.6)}
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
+	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
 	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
 		tmp_path,
-		krr_map,
-		comment_map=comment_map,
+		rec_map,
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		comment_index=comment_index,
@@ -219,19 +215,63 @@ spec:
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
-	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
-	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
+	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
 	_, _, unmatched, _ = _apply_krr_to_repo(
 		tmp_path,
-		krr_map,
-		comment_map={},
+		rec_map,
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		comment_index=comment_index,
 		chart_name="app-template",
 		only_missing=False,
 		no_name_fallback=False,
+		yaml_issues={"warnings": [], "errors": []},
+	)
+
+	assert unmatched == []
+
+
+def test_unmatched_excludes_comment_targets(tmp_path: Path) -> None:
+	# Intended behavior: comment-based matches suppress unmatched entries.
+	manifest = """\
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: trivy-operator
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: trivy-operator
+  values:
+    # krr: controller=trivy-operator container=trivy-operator
+    resources:
+      requests:
+        cpu: 10m
+"""
+	path = _write_yaml(tmp_path, "hr.yaml", manifest)
+
+	hr_index, hr_index_by_name, comment_index = _build_hr_index(
+		tmp_path,
+		[path],
+		chart_name="trivy-operator",
+		chartref_kind="OCIRepository",
+		yaml_issues={"warnings": [], "errors": []},
+	)
+
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="trivy-operator"), controller="trivy-operator", container="trivy-operator")
+	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
+
+	_, _, unmatched, _ = _apply_krr_to_repo(
+		tmp_path,
+		rec_map,
+		hr_index=hr_index,
+		hr_index_by_name=hr_index_by_name,
+		comment_index=comment_index,
+		chart_name="trivy-operator",
+		only_missing=False,
+		no_name_fallback=True,
 		yaml_issues={"warnings": [], "errors": []},
 	)
 

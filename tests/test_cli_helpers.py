@@ -11,7 +11,7 @@ from auto_krr.cli import (
 	_record_yaml_warnings,
 	_resolve_env_args,
 )
-from auto_krr.types import HrRef
+from auto_krr.types import ResourceRef
 
 
 def test_parse_args_and_resolve_env(monkeypatch) -> None:
@@ -95,7 +95,7 @@ spec:
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
-	assert HrRef(namespace="default", name="demo") in hr_index
+	assert ResourceRef(kind="HelmRelease", namespace="default", name="demo") in hr_index
 	assert "demo" in hr_index_by_name
 	assert len(comment_index) == 1
 

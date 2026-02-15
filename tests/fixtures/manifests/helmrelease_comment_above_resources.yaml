@@ -1,0 +1,17 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: trivy-operator
+  namespace: trivy-system
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: trivy-operator
+  values:
+    trivy:
+      server:
+        # krr: controller=trivy-server container=trivy-server
+        resources:
+          requests:
+            cpu: 17m
+            memory: 432Mi

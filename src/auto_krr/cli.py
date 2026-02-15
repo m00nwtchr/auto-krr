@@ -34,11 +34,11 @@ from .git_utils import (
 	_set_git_verbose,
 )
 from .comment_targets import _find_krr_comment_targets
-from .hr import _hr_ref_from_doc, _infer_namespace_from_path, _is_app_template_hr, _is_helmrelease
+from .hr import _infer_namespace_from_path, _is_app_template_hr, _is_helmrelease, _resource_ref_from_doc
 from .krr import _aggregate_krr
 from .patching import HELM_VALUES_CONFIGS, _apply_to_resources_map
 from .resources_matchers import CommentResourcesMatcher, HeuristicResourcesMatcher, HelmValuesResourcesMatcher, ResourcesMatcher, TargetMatch
-from .types import CommentTargetKey, CommentTargetLoc, ForgejoRepo, HrDocLoc, HrRef, RecommendedResources, TargetKey, YamlDocBundle
+from .types import CommentTargetLoc, ForgejoRepo, HrDocLoc, RecommendedResources, ResourceRef, TargetKey, YamlDocBundle
 from .yaml_utils import _dump_all_yaml_docs, _read_all_yaml_docs
 
 
@@ -197,24 +197,28 @@ def _build_hr_index(
 	chart_name: str,
 	chartref_kind: str,
 	yaml_issues: Dict[str, List[str]],
-) -> Tuple[Dict[HrRef, List[HrDocLoc]], Dict[str, List[HrDocLoc]], Dict[CommentTargetKey, List[CommentTargetLoc]]]:
-	hr_index: Dict[HrRef, List[HrDocLoc]] = {}
+) -> Tuple[Dict[ResourceRef, List[HrDocLoc]], Dict[str, List[HrDocLoc]], Dict[TargetKey, List[CommentTargetLoc]]]:
+	hr_index: Dict[ResourceRef, List[HrDocLoc]] = {}
 	hr_index_by_name: Dict[str, List[HrDocLoc]] = {}
-	comment_index: Dict[CommentTargetKey, List[CommentTargetLoc]] = {}
+	comment_index: Dict[TargetKey, List[CommentTargetLoc]] = {}
 
 	for fp in yaml_files:
 		try:
 			with warnings.catch_warnings(record=True) as caught:
 				warnings.simplefilter("always")
-				_, docs, _ = _read_all_yaml_docs(fp)
+				raw, docs, _ = _read_all_yaml_docs(fp)
 			_record_yaml_warnings(repo_root, fp, "read", caught, yaml_issues)
 		except Exception as e:
 			_record_yaml_error(repo_root, fp, "read", e, yaml_issues)
 			continue
 
 		for i, doc in enumerate(docs):
-			for match in _find_krr_comment_targets(doc):
-				key = CommentTargetKey(controller=match.controller, container=match.container)
+			ref = None
+			if isinstance(doc, dict):
+				ref = _resource_ref_from_doc(doc)
+
+			for match in _find_krr_comment_targets(doc, raw_lines=raw.splitlines()):
+				key = TargetKey(resource=ref, controller=match.controller, container=match.container)
 				loc = CommentTargetLoc(path=fp, doc_index=i, resources_path=match.resources_path)
 				comment_index.setdefault(key, []).append(loc)
 
@@ -223,7 +227,7 @@ def _build_hr_index(
 			if not _is_app_template_hr(doc, chart_name=chart_name, chartref_kind=chartref_kind):
 				continue
 
-			ref = _hr_ref_from_doc(doc)
+			ref = _resource_ref_from_doc(doc)
 			if not ref.name:
 				continue
 
@@ -231,7 +235,7 @@ def _build_hr_index(
 			if (not meta.get("namespace")) and ref.namespace == "default":
 				guess = _infer_namespace_from_path(repo_root, fp)
 				if guess:
-					ref = HrRef(namespace=guess, name=ref.name)
+					ref = ResourceRef(kind=ref.kind, namespace=guess, name=ref.name)
 
 			loc = HrDocLoc(path=fp, doc_index=i, doc=doc)
 			hr_index.setdefault(ref, []).append(loc)
@@ -242,11 +246,10 @@ def _build_hr_index(
 
 def _apply_krr_to_repo(
 	repo_root: Path,
-	krr_map: Dict[TargetKey, RecommendedResources],
-	comment_map: Dict[CommentTargetKey, RecommendedResources],
-	hr_index: Dict[HrRef, List[HrDocLoc]],
+	rec_map: Dict[TargetKey, RecommendedResources],
+	hr_index: Dict[ResourceRef, List[HrDocLoc]],
 	hr_index_by_name: Dict[str, List[HrDocLoc]],
-	comment_index: Dict[CommentTargetKey, List[CommentTargetLoc]],
+	comment_index: Dict[TargetKey, List[CommentTargetLoc]],
 	*,
 	chart_name: str,
 	only_missing: bool,
@@ -289,11 +292,11 @@ def _apply_krr_to_repo(
 		)
 	comment_matcher = CommentResourcesMatcher(comment_index=comment_index, repo_root=repo_root)
 
-	matched_targets: set[str] = set()
+	matched_targets: set[TargetKey] = set()
 	seen_resources: set[tuple[str, int, int]] = set()
 	total_changed_targets += _apply_with_matcher(
 		matcher=helm_values_matcher,
-		rec_map=krr_map,
+		rec_map=rec_map,
 		ensure_loaded=_ensure_loaded,
 		only_missing=only_missing,
 		repo_root=repo_root,
@@ -305,20 +308,31 @@ def _apply_krr_to_repo(
 
 	total_changed_targets += _apply_with_matcher(
 		matcher=comment_matcher,
-		rec_map=comment_map,
+		rec_map=rec_map,
 		ensure_loaded=_ensure_loaded,
 		only_missing=only_missing,
 		repo_root=repo_root,
-		matched_targets=None,
+		matched_targets=matched_targets,
 		seen_resources=seen_resources,
 		updated=updated,
 		skipped=skipped,
 	)
 
+	def _describe_unmatched(target: TargetKey) -> str:
+		if target.resource:
+			kind = target.resource.kind or "resource"
+			namespace = target.resource.namespace or "default"
+			name = target.resource.name or "unknown"
+		else:
+			kind = "resource"
+			namespace = "unknown"
+			name = "unknown"
+		return f"{kind} {namespace}/{name} controller={target.controller} container={target.container} (unmatched)"
+
 	unmatched = [
-		helm_values_matcher.describe_target(target)
-		for target in krr_map.keys()
-		if helm_values_matcher.describe_target(target) not in matched_targets
+		_describe_unmatched(target)
+		for target in rec_map.keys()
+		if target not in matched_targets
 	]
 
 	return changed_files, total_changed_targets, unmatched, {"updated": updated, "skipped": skipped}
@@ -331,7 +345,7 @@ def _apply_with_matcher(
 	ensure_loaded,
 	only_missing: bool,
 	repo_root: Path,
-	matched_targets: Optional[set[str]],
+	matched_targets: Optional[set[TargetKey]],
 	seen_resources: set[tuple[str, int, int]],
 	updated: List[str],
 	skipped: List[str],
@@ -352,7 +366,8 @@ def _apply_with_matcher(
 			continue
 
 		if matched_targets is not None:
-			matched_targets.add(target_id)
+			keys = target_match.matched_targets or [target]
+			matched_targets.update(keys)
 
 		for note in target_match.match.info_notes:
 			print(note)
@@ -772,8 +787,8 @@ def main() -> int:
 		print(f"ERROR: {e}", file=sys.stderr)
 		return 2
 
-	krr_map, comment_map = _aggregate_krr(args.krr_json, min_severity=args.min_severity)
-	if not krr_map and not comment_map:
+	rec_map = _aggregate_krr(args.krr_json, min_severity=args.min_severity)
+	if not rec_map:
 		print("No applicable KRR entries found (after severity filter).", file=sys.stderr)
 		return 2
 
@@ -795,8 +810,7 @@ def main() -> int:
 
 		changed_files, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
 			repo_root,
-			krr_map,
-			comment_map,
+			rec_map,
 			hr_index,
 			hr_index_by_name,
 			comment_index,
