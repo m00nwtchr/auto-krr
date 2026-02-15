@@ -117,3 +117,22 @@ def test_heuristic_matcher_skips_when_multiple_workloads() -> None:
 	assert resources is None
 	assert changed is False
 	assert any("single workload" in note for note in notes)
+
+
+def test_heuristic_matcher_skips_when_resources_missing() -> None:
+	# Intended behavior: skip heuristic when spec.values.resources is missing or wrong type.
+	doc = _load_doc("helmrelease_app_template_missing_containers.yaml")
+	loc = HrDocLoc(path=Path("fake.yaml"), doc_index=0, doc=doc)
+	target = TargetKey(hr=HrRef(namespace="default", name="krr"), controller="main", container="app")
+
+	matcher = HeuristicResourcesMatcher(
+		hr_index={target.hr: [loc]},
+		hr_index_by_name={},
+		no_name_fallback=True,
+	)
+
+	_ = next(iter(matcher.iter_targets({target: RecommendedResources(req_cpu_cores=0.5)})))
+	resources, changed, notes = matcher.resolve_resources(doc, target, loc)
+	assert resources is None
+	assert changed is False
+	assert any("spec.values.resources" in note for note in notes)

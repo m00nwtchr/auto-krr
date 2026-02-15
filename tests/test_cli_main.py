@@ -149,3 +149,69 @@ def test_main_retries_on_rebase_conflict(monkeypatch, tmp_path: Path) -> None:
 
 	assert cli.main() == 0
 	assert call_state["calls"] == 2
+
+
+def test_main_stops_after_second_rebase_conflict(monkeypatch, tmp_path: Path) -> None:
+	# Intended behavior: stop after retrying once if conflicts persist.
+	manifest_path = _write_manifest(tmp_path)
+	args = _base_args(tmp_path)
+	args.write = True
+	args.pr = True
+	args.forgejo_token = "t"
+
+	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
+	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
+
+	monkeypatch.setattr(cli, "_parse_args", lambda: args)
+	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
+	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
+	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
+	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
+	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
+	monkeypatch.setattr(cli, "_maybe_create_pr", lambda *_a, **_kw: 3)
+
+	assert cli.main() == 0
+
+
+def test_maybe_create_pr_updates_when_author_matches(monkeypatch, tmp_path: Path) -> None:
+	# Intended behavior: update PR body only when author matches current Forgejo user.
+	args = _base_args(tmp_path)
+	args.pr = True
+	args.forgejo_token = "t"
+	args.forgejo_url = "https://forgejo.example.com"
+	args.forgejo_owner = "o"
+	args.forgejo_repo = "r"
+
+	monkeypatch.setattr(cli, "_ensure_git_http_auth", lambda *_args, **_kw: None)
+	monkeypatch.setattr(cli, "_run_git", lambda *_args, **_kw: None)
+	monkeypatch.setattr(cli, "_git_push_set_upstream", lambda *_args, **_kw: None)
+	monkeypatch.setattr(cli, "_forgejo_find_open_pr", lambda *_args, **_kw: "https://pr/1")
+	monkeypatch.setattr(
+		cli,
+		"_forgejo_find_open_pr_data",
+		lambda *_args, **_kw: {"number": 1, "user": {"login": "me"}},
+	)
+	monkeypatch.setattr(cli, "_forgejo_get_user", lambda *_args, **_kw: {"login": "me"})
+
+	updated = {"called": False}
+
+	def _update(*_args, **_kwargs):
+		updated["called"] = True
+		return "https://pr/1"
+
+	monkeypatch.setattr(cli, "_forgejo_update_pr", _update)
+
+	assert (
+		cli._maybe_create_pr(
+			args,
+			tmp_path,
+			base_branch="main",
+			head_branch="branch",
+			had_changes=True,
+			summary={"updated": [], "skipped": []},
+			unmatched=[],
+		)
+		== 0
+	)
+	assert updated["called"] is True

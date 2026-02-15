@@ -98,3 +98,23 @@ spec:
 	assert HrRef(namespace="default", name="demo") in hr_index
 	assert "demo" in hr_index_by_name
 	assert len(comment_index) == 1
+
+
+def test_build_hr_index_handles_invalid_yaml(tmp_path: Path) -> None:
+	# Intended behavior: invalid YAML records an error and continues.
+	path = tmp_path / "bad.yaml"
+	path.write_text("not: [valid", encoding="utf-8")
+
+	yaml_issues = {"warnings": [], "errors": []}
+	hr_index, hr_index_by_name, comment_index = _build_hr_index(
+		tmp_path,
+		[path],
+		chart_name="app-template",
+		chartref_kind="OCIRepository",
+		yaml_issues=yaml_issues,
+	)
+
+	assert hr_index == {}
+	assert hr_index_by_name == {}
+	assert comment_index == {}
+	assert yaml_issues["errors"]

@@ -76,6 +76,22 @@ def test_aggregate_krr_merges_and_filters(tmp_path: Path) -> None:
 	assert rec.lim_cpu_cores == 1.0
 
 
+def test_aggregate_krr_skips_invalid_entries(tmp_path: Path) -> None:
+	# Intended behavior: skip scans with missing controller/container or no values.
+	data = {
+		"scans": [
+			{"severity": "WARNING", "object": {"name": "app"}, "container": "", "recommended": {}},
+			{"severity": "WARNING", "object": {}, "container": "c", "recommended": {}},
+		]
+	}
+	json_path = tmp_path / "krr.json"
+	json_path.write_text(json.dumps(data), encoding="utf-8")
+
+	hr_out, comment_out = _aggregate_krr(json_path, min_severity="WARNING")
+	assert hr_out == {}
+	assert comment_out == {}
+
+
 def test_infer_namespace_from_path() -> None:
 	# Intended behavior: infer namespaces from common repo layouts.
 	repo_root = Path("/repo")

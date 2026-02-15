@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import os
 import sys
 import warnings
 from pathlib import Path
@@ -10,7 +11,13 @@ from typing import Dict, List, Optional, Tuple
 from ruamel.yaml.comments import CommentedMap
 
 from .env import _env_bool, _env_get, _env_key, _env_path, _env_str
-from .forgejo import _forgejo_create_pr, _forgejo_find_open_pr
+from .forgejo import (
+	_forgejo_create_pr,
+	_forgejo_find_open_pr,
+	_forgejo_find_open_pr_data,
+	_forgejo_get_user,
+	_forgejo_update_pr,
+)
 from .git_utils import (
 	_detect_forgejo_from_remote,
 	_ensure_git_http_auth,
@@ -495,6 +502,24 @@ def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
 	return "\n".join(lines)
 
 
+def _expected_pr_authors(*, forgejo_user: Optional[Dict[str, object]] = None) -> set[str]:
+	authors: set[str] = set()
+	if forgejo_user:
+		for key in ("login", "username"):
+			val = forgejo_user.get(key)
+			if isinstance(val, str) and val.strip():
+				authors.add(val.strip().lower())
+	for key in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+		val = (os.environ.get(key) or "").strip()
+		if val:
+			authors.add(val.lower())
+	for key in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+		email = (os.environ.get(key) or "").strip()
+		if email and "@" in email:
+			authors.add(email.split("@", 1)[0].lower())
+	return authors
+
+
 def _format_cli_summary(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
 	updated = summary.get("updated", [])
 	skipped = summary.get("skipped", [])
@@ -644,6 +669,39 @@ def _maybe_create_pr(
 				return 3
 			_git_push_set_upstream(repo_root, args.remote, head_branch)
 			print(f"PUSHED: {args.remote}/{head_branch}")
+			body = _format_pr_body(summary, unmatched)
+			pr_data = _forgejo_find_open_pr_data(
+				repo,
+				token=token,
+				auth_scheme=args.forgejo_auth_scheme,
+				base_branch=base_branch,
+				head_branch=head_branch,
+				insecure_tls=args.insecure_tls,
+			)
+			if pr_data and isinstance(pr_data.get("number"), int):
+				author = ""
+				user = pr_data.get("user") or {}
+				if isinstance(user, dict):
+					author = str(user.get("login") or user.get("username") or "")
+				forgejo_user = _forgejo_get_user(
+					repo,
+					token=token,
+					auth_scheme=args.forgejo_auth_scheme,
+					insecure_tls=args.insecure_tls,
+				)
+				allowed = _expected_pr_authors(forgejo_user=forgejo_user)
+				if author and author.lower() in allowed:
+					pr_url = _forgejo_update_pr(
+						repo,
+						token=token,
+						auth_scheme=args.forgejo_auth_scheme,
+						pr_number=pr_data["number"],
+						body=body,
+						insecure_tls=args.insecure_tls,
+					)
+					print(f"PR UPDATED: {pr_url}")
+				else:
+					print("PR EXISTS: not updating (author mismatch).")
 			print(f"PR EXISTS: {existing}")
 			return 0
 

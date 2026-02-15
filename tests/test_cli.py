@@ -188,3 +188,51 @@ spec:
 	assert total_changed == 1
 	assert unmatched == []
 	assert any("resources block already matched" in item for item in summary["skipped"])
+
+
+def test_apply_krr_to_repo_name_only_ambiguity(tmp_path: Path) -> None:
+	# Intended behavior: ambiguous name-only matches are treated as unmatched.
+	manifest = """\
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: demo
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: app-template
+  values:
+    controllers:
+      main:
+        containers:
+          app:
+            image: ghcr.io/example/app:1.0
+"""
+	path_a = _write_yaml(tmp_path, "hr-a.yaml", manifest)
+	path_b = _write_yaml(tmp_path, "hr-b.yaml", manifest)
+
+	hr_index, hr_index_by_name, comment_index = _build_hr_index(
+		tmp_path,
+		[path_a, path_b],
+		chart_name="app-template",
+		chartref_kind="OCIRepository",
+		yaml_issues={"warnings": [], "errors": []},
+	)
+
+	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
+	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
+
+	_, _, unmatched, _ = _apply_krr_to_repo(
+		tmp_path,
+		krr_map,
+		comment_map={},
+		hr_index=hr_index,
+		hr_index_by_name=hr_index_by_name,
+		comment_index=comment_index,
+		chart_name="app-template",
+		only_missing=False,
+		no_name_fallback=False,
+		yaml_issues={"warnings": [], "errors": []},
+	)
+
+	assert unmatched == []
