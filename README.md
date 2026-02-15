@@ -7,9 +7,12 @@ This is a CLI-first project and is **dry-run by default**.
 ## Features
 - Reads `krr.json` and aggregates per-container recommendations.
 - Filters by severity (OK/GOOD/WARNING/CRITICAL).
-- Matches Flux HelmReleases using bjw-s app-template (`chartRef` or `chart.spec.chart`).
+- Matches Flux HelmReleases using the bjw-s app-template (`chartRef` or `chart.spec.chart`).
 - Updates `spec.values.controllers[].containers[].resources` with CPU/memory requests/limits.
 - Git-aware: only touches tracked YAML files; can stage/commit/push and open a PR.
+
+## KRR vs repo objects (summary)
+KRR reports live in-cluster workloads (Deployments, StatefulSets, etc.), but this tool updates the upstream repo resources (HelmReleases/CRs) that generate those workloads. The `controller=` target value refers to the runtime workload resource name from KRR, e.g. `controller=trivy-operator` means a workload named `trivy-operator` exists (Deployment/StatefulSet/etc.), not the repo controller. Any namespace or identity from KRR is treated as a hint and only used when the mapping is certain.
 
 ## Requirements
 - Python 3.13+
@@ -81,13 +84,28 @@ spec.values.controllers.<controller>.containers.<container>.resources
 ```
 It converts CPU to millicores (`m`) and memory to Mi/Gi (rounded up). When multiple KRR entries match the same target, it keeps the **maximum** recommendation per field.
 
+## Helm values config (per chart)
+The HelmRelease matcher uses a per-chart `HelmValuesConfig` to decide how to find controllers/containers and where to write `resources`. These configs live in `src/auto_krr/patching.py` under `HELM_VALUES_CONFIGS` and are keyed by chart name.
+
+Each config defines:
+- `chart_name`: chart name to match in the HelmRelease (`chartRef.name` or `chart.spec.chart`).
+- `controllers_path`: YAML path to the controllers map (e.g. `spec.values.controllers`).
+- `containers_key`: key holding container definitions under a controller.
+- `resources_key`: key to update under each container.
+- `containers_after_keys`: ordering hints used when inserting `resources`.
+- `controller_fallbacks`: fallback controller names to try (e.g. `main`).
+- `container_fallbacks`: fallback container names to try (e.g. `app`, `main`).
+- `allow_controller_name`: allow using the HelmRelease name as a controller fallback.
+- `allow_single_controller`: allow using the only controller when there is a single entry.
+- `allow_single_container`: allow using the only container when there is a single entry.
+
+If no config matches the chart name, the matcher falls back to heuristic matching on `spec.values.resources`.
+
 ## CLI options (high level)
 - `--krr-json`: path to KRR report (required)
 - `--repo`: path inside repo or clone destination
 - `--repo-url`: git URL or `owner/repo` shorthand (auto-clone)
 - `--git-base-url`: base URL for shorthand (defaults to `FORGEJO_URL` or GitHub)
-- `--chart-name`: chart name to match (default: `app-template`)
-- `--chartref-kind`: `chartRef.kind` to match (default: `OCIRepository`)
 - `--min-severity`: `OK|GOOD|WARNING|CRITICAL` (default: `WARNING`)
 - `--only-missing`: only set fields that are currently missing
 - `--no-name-fallback`: disable name-only matching when namespace is missing
@@ -116,8 +134,6 @@ Common ones:
 - `REPO_URL`
 - `GIT_BASE_URL`
 - `CLONE_DEPTH`
-- `CHART_NAME`
-- `CHARTREF_KIND`
 - `MIN_SEVERITY`
 - `ONLY_MISSING`
 - `NO_NAME_FALLBACK`

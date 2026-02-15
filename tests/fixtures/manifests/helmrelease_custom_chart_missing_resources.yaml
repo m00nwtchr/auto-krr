@@ -1,0 +1,11 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: krr
+  namespace: default
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: custom-chart
+  values:
+    someSetting: true

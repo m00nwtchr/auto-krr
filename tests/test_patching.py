@@ -1,6 +1,6 @@
 from ruamel.yaml.comments import CommentedMap
 
-from auto_krr.patching import _apply_to_hr_doc, _cpu_qty, _mem_qty, _pick_container_key, _pick_controller_key
+from auto_krr.patching import HELM_VALUES_CONFIGS, _apply_to_hr_doc, _cpu_qty, _mem_qty, _pick_container_key, _pick_controller_key
 from auto_krr.types import RecommendedResources, ResourceRef, TargetKey
 
 
@@ -20,20 +20,21 @@ def test_pick_controller_and_container_keys() -> None:
 	controllers = CommentedMap()
 	controllers["main"] = CommentedMap()
 	controllers["worker"] = CommentedMap()
-	assert _pick_controller_key(controllers, "missing", "app") == "main"
+	config = HELM_VALUES_CONFIGS["app-template"]
+	assert _pick_controller_key(controllers, "missing", "app", config) == "main"
 
 	controllers = CommentedMap()
 	controllers["app"] = CommentedMap()
-	assert _pick_controller_key(controllers, "missing", "app") == "app"
+	assert _pick_controller_key(controllers, "missing", "app", config) == "app"
 
 	containers = CommentedMap()
 	containers["main"] = CommentedMap()
 	containers["sidecar"] = CommentedMap()
-	assert _pick_container_key(containers, "missing") == "main"
+	assert _pick_container_key(containers, "missing", config) == "main"
 
 	containers = CommentedMap()
 	containers["only"] = CommentedMap()
-	assert _pick_container_key(containers, "missing") == "only"
+	assert _pick_container_key(containers, "missing", config) == "only"
 
 
 def test_apply_to_hr_doc_only_missing() -> None:

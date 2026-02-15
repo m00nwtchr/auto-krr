@@ -64,8 +64,6 @@ spec:
 	hr_index, hr_index_by_name, comment_index = _build_hr_index(
 		tmp_path,
 		[path],
-		chart_name="app-template",
-		chartref_kind="OCIRepository",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
@@ -75,10 +73,10 @@ spec:
 	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
+		hints_map={},
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		comment_index=comment_index,
-		chart_name="app-template",
 		only_missing=False,
 		no_name_fallback=True,
 		yaml_issues={"warnings": [], "errors": []},
@@ -112,8 +110,6 @@ spec:
 	hr_index, hr_index_by_name, comment_index = _build_hr_index(
 		tmp_path,
 		[path],
-		chart_name="custom-chart",
-		chartref_kind="OCIRepository",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
@@ -123,10 +119,10 @@ spec:
 	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
+		hints_map={},
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		comment_index=comment_index,
-		chart_name="custom-chart",
 		only_missing=False,
 		no_name_fallback=True,
 		yaml_issues={"warnings": [], "errors": []},
@@ -160,8 +156,6 @@ spec:
 	hr_index, hr_index_by_name, comment_index = _build_hr_index(
 		tmp_path,
 		[path],
-		chart_name="custom-chart",
-		chartref_kind="OCIRepository",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
@@ -171,10 +165,10 @@ spec:
 	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
+		hints_map={},
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		comment_index=comment_index,
-		chart_name="custom-chart",
 		only_missing=False,
 		no_name_fallback=True,
 		yaml_issues={"warnings": [], "errors": []},
@@ -210,8 +204,6 @@ spec:
 	hr_index, hr_index_by_name, comment_index = _build_hr_index(
 		tmp_path,
 		[path_a, path_b],
-		chart_name="app-template",
-		chartref_kind="OCIRepository",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
@@ -221,10 +213,10 @@ spec:
 	_, _, unmatched, _ = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
+		hints_map={},
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		comment_index=comment_index,
-		chart_name="app-template",
 		only_missing=False,
 		no_name_fallback=False,
 		yaml_issues={"warnings": [], "errors": []},
@@ -255,8 +247,6 @@ spec:
 	hr_index, hr_index_by_name, comment_index = _build_hr_index(
 		tmp_path,
 		[path],
-		chart_name="trivy-operator",
-		chartref_kind="OCIRepository",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
@@ -266,10 +256,10 @@ spec:
 	_, _, unmatched, _ = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
+		hints_map={},
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		comment_index=comment_index,
-		chart_name="trivy-operator",
 		only_missing=False,
 		no_name_fallback=True,
 		yaml_issues={"warnings": [], "errors": []},

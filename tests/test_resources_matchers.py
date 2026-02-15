@@ -2,8 +2,7 @@ from pathlib import Path
 
 from ruamel.yaml.comments import CommentedMap
 
-from auto_krr.patching import HELM_VALUES_CONFIGS
-from auto_krr.resources_matchers import HeuristicResourcesMatcher, HelmValuesResourcesMatcher
+from auto_krr.resources_matchers import HelmReleaseMatcher
 from auto_krr.types import HrDocLoc, RecommendedResources, ResourceRef, TargetKey
 from auto_krr.yaml_utils import _read_all_yaml_docs
 
@@ -24,11 +23,10 @@ def test_helm_values_matcher_name_only_fallback() -> None:
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="chronyd"), controller="main", container="app")
 	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
-	matcher = HelmValuesResourcesMatcher(
+	matcher = HelmReleaseMatcher(
 		hr_index={},
 		hr_index_by_name={"chronyd": [loc]},
 		no_name_fallback=False,
-		config=HELM_VALUES_CONFIGS["app-template"],
 	)
 
 	target_match = next(iter(matcher.iter_targets(rec_map)))
@@ -43,11 +41,10 @@ def test_helm_values_matcher_resolve_resources_creates_map() -> None:
 	loc = HrDocLoc(path=Path("fake.yaml"), doc_index=0, doc=doc)
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="chronyd"), controller="main", container="app")
 
-	matcher = HelmValuesResourcesMatcher(
+	matcher = HelmReleaseMatcher(
 		hr_index={},
 		hr_index_by_name={},
 		no_name_fallback=True,
-		config=HELM_VALUES_CONFIGS["app-template"],
 	)
 
 	resources, changed, notes = matcher.resolve_resources(doc, target, loc)
@@ -61,26 +58,25 @@ def test_helm_values_matcher_describe_match_uses_resource_identity() -> None:
 	doc = _load_doc("helmrelease_app_template_resources_missing.yaml")
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="chronyd"), controller="main", container="app")
 
-	matcher = HelmValuesResourcesMatcher(
+	matcher = HelmReleaseMatcher(
 		hr_index={},
 		hr_index_by_name={},
 		no_name_fallback=True,
-		config=HELM_VALUES_CONFIGS["app-template"],
 	)
 
 	label = matcher.describe_match(target, doc)
 	assert label.startswith("HelmRelease default/chronyd")
-	assert label.endswith("(helm-values)")
+	assert label.endswith("(helmrelease)")
 
 
-def test_heuristic_matcher_uses_values_resources_when_single_workload() -> None:
+def test_helmrelease_matcher_uses_values_resources_when_single_workload() -> None:
 	# Intended behavior: use spec.values.resources when a single workload is associated.
 	doc = _load_doc("helmrelease_trivy_operator_comments.yaml")
 	loc = HrDocLoc(path=Path("fake.yaml"), doc_index=0, doc=doc)
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="trivy-system", name="trivy-operator"), controller="main", container="main")
 	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
-	matcher = HeuristicResourcesMatcher(
+	matcher = HelmReleaseMatcher(
 		hr_index={target.resource: [loc]},
 		hr_index_by_name={},
 		no_name_fallback=True,
@@ -94,7 +90,7 @@ def test_heuristic_matcher_uses_values_resources_when_single_workload() -> None:
 	assert notes == []
 
 
-def test_heuristic_matcher_skips_when_multiple_workloads() -> None:
+def test_helmrelease_matcher_skips_when_multiple_workloads() -> None:
 	# Intended behavior: skip heuristic when multiple workloads share a HelmRelease.
 	doc = _load_doc("helmrelease_trivy_operator_comments.yaml")
 	loc = HrDocLoc(path=Path("fake.yaml"), doc_index=0, doc=doc)
@@ -106,7 +102,7 @@ def test_heuristic_matcher_skips_when_multiple_workloads() -> None:
 		target_b: RecommendedResources(req_cpu_cores=0.6),
 	}
 
-	matcher = HeuristicResourcesMatcher(
+	matcher = HelmReleaseMatcher(
 		hr_index={resource: [loc]},
 		hr_index_by_name={},
 		no_name_fallback=True,
@@ -119,13 +115,13 @@ def test_heuristic_matcher_skips_when_multiple_workloads() -> None:
 	assert any("single workload" in note for note in notes)
 
 
-def test_heuristic_matcher_skips_when_resources_missing() -> None:
+def test_helmrelease_matcher_skips_when_resources_missing() -> None:
 	# Intended behavior: skip heuristic when spec.values.resources is missing or wrong type.
-	doc = _load_doc("helmrelease_app_template_missing_containers.yaml")
+	doc = _load_doc("helmrelease_custom_chart_missing_resources.yaml")
 	loc = HrDocLoc(path=Path("fake.yaml"), doc_index=0, doc=doc)
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="krr"), controller="main", container="app")
 
-	matcher = HeuristicResourcesMatcher(
+	matcher = HelmReleaseMatcher(
 		hr_index={target.resource: [loc]},
 		hr_index_by_name={},
 		no_name_fallback=True,

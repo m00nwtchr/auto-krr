@@ -18,7 +18,6 @@ def test_parse_args_and_resolve_env(monkeypatch) -> None:
 	# Intended behavior: resolve args from env defaults when flags are not provided.
 	monkeypatch.setenv("KRR_JSON", "/tmp/krr.json")
 	monkeypatch.setenv("REPO", "/tmp/repo")
-	monkeypatch.setenv("CHART_NAME", "custom-chart")
 	monkeypatch.setenv("MIN_SEVERITY", "CRITICAL")
 	monkeypatch.setenv("WRITE", "1")
 
@@ -28,7 +27,6 @@ def test_parse_args_and_resolve_env(monkeypatch) -> None:
 
 	assert str(args.krr_json) == "/tmp/krr.json"
 	assert str(args.repo) == "/tmp/repo"
-	assert args.chart_name == "custom-chart"
 	assert args.min_severity == "CRITICAL"
 	assert args.write is True
 
@@ -90,8 +88,6 @@ spec:
 	hr_index, hr_index_by_name, comment_index = _build_hr_index(
 		tmp_path,
 		[path],
-		chart_name="app-template",
-		chartref_kind="OCIRepository",
 		yaml_issues={"warnings": [], "errors": []},
 	)
 
@@ -109,8 +105,6 @@ def test_build_hr_index_handles_invalid_yaml(tmp_path: Path) -> None:
 	hr_index, hr_index_by_name, comment_index = _build_hr_index(
 		tmp_path,
 		[path],
-		chart_name="app-template",
-		chartref_kind="OCIRepository",
 		yaml_issues=yaml_issues,
 	)
 

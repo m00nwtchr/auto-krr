@@ -34,3 +34,6 @@
 - The tool is dry-run by default; `--write` is required to modify files.
 - Only tracked YAML files are scanned, so ensure target manifests are committed before running.
 - Forgejo PR creation requires `FORGEJO_TOKEN` and related `--forgejo-*` flags.
+- KRR reports live in-cluster workloads (Deployments, StatefulSets, etc.) while the repo contains upstream controllers (HelmReleases, CRs) that generate them; mapping between the two must remain explicit.
+- The `controller=` target value refers to the runtime workload resource name (from KRR), e.g. `controller=trivy-operator` means a workload named `trivy-operator` exists (Deployment/StatefulSet/etc.), not the repo controller.
+- Namespaces from KRR are hints only and should not overwrite repo-derived resource references unless the mapping is certain.

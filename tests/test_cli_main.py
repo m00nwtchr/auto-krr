@@ -12,8 +12,6 @@ def _base_args(tmp_path: Path) -> Namespace:
 		repo_url="",
 		git_base_url="",
 		clone_depth=None,
-		chart_name="app-template",
-		chartref_kind="OCIRepository",
 		min_severity="WARNING",
 		only_missing=False,
 		no_name_fallback=True,
@@ -73,7 +71,7 @@ def test_main_dry_run(monkeypatch, tmp_path: Path) -> None:
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: krr_map)
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 
 	assert cli.main() == 0
@@ -88,7 +86,7 @@ def test_main_no_changes(monkeypatch, tmp_path: Path) -> None:
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: {})
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: ({}, {}))
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 
 	assert cli.main() == 2
@@ -107,7 +105,7 @@ def test_main_write_path(monkeypatch, tmp_path: Path) -> None:
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: krr_map)
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
 
@@ -142,7 +140,7 @@ def test_main_retries_on_rebase_conflict(monkeypatch, tmp_path: Path) -> None:
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: krr_map)
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
 	monkeypatch.setattr(cli, "_maybe_create_pr", _fake_maybe_create_pr)
@@ -166,7 +164,7 @@ def test_main_stops_after_second_rebase_conflict(monkeypatch, tmp_path: Path) ->
 	monkeypatch.setattr(cli, "_resolve_env_args", lambda a: a)
 	monkeypatch.setattr(cli, "_set_git_verbose", lambda *_: None)
 	monkeypatch.setattr(cli, "_prepare_repo", lambda *_: (tmp_path, "main", "branch"))
-	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: krr_map)
+	monkeypatch.setattr(cli, "_aggregate_krr", lambda *_args, **_kw: (krr_map, {}))
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
 	monkeypatch.setattr(cli, "_maybe_create_pr", lambda *_a, **_kw: 3)
