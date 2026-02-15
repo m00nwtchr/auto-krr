@@ -27,7 +27,10 @@ def _find_krr_comment_targets(doc: Any, *, raw_lines: Optional[List[str]] = None
 					if not texts and node and list(node.keys())[0] == key:
 						texts = _comment_texts_for_map(node)
 					if not texts and raw_lines is not None:
-						pos = node.lc.key(key)
+						try:
+							pos = node.lc.key(key)
+						except Exception:
+							pos = None
 						line = pos[0] if isinstance(pos, tuple) else pos
 						if isinstance(line, int) and line > 0:
 							prev = raw_lines[line - 1]

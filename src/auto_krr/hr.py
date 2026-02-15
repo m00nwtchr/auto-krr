@@ -44,22 +44,21 @@ def _infer_namespace_from_path(repo_root: Path, file_path: Path) -> Optional[str
 	return None
 
 
-def _is_app_template_hr(doc: Dict[str, Any], *, chart_name: str, chartref_kind: str) -> bool:
+def _chart_name_from_hr(doc: Dict[str, Any]) -> Optional[str]:
 	spec = doc.get("spec") or {}
 
 	chart_ref = spec.get("chartRef") or {}
 	if isinstance(chart_ref, dict):
-		cr_kind = str(chart_ref.get("kind") or "")
 		cr_name = str(chart_ref.get("name") or "")
-		if cr_kind == chartref_kind and cr_name == chart_name:
-			return True
+		if cr_name:
+			return cr_name
 
 	chart = spec.get("chart") or {}
 	if isinstance(chart, dict):
 		chart_spec = chart.get("spec") or {}
 		if isinstance(chart_spec, dict):
 			ch = str(chart_spec.get("chart") or "")
-			if ch == chart_name:
-				return True
+			if ch:
+				return ch
 
-	return False
+	return None

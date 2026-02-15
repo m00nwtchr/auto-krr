@@ -34,11 +34,11 @@ from .git_utils import (
 	_set_git_verbose,
 )
 from .comment_targets import _find_krr_comment_targets
-from .hr import _infer_namespace_from_path, _is_app_template_hr, _is_helmrelease, _resource_ref_from_doc
+from .hr import _infer_namespace_from_path, _is_helmrelease, _resource_ref_from_doc
 from .krr import _aggregate_krr
-from .patching import HELM_VALUES_CONFIGS, _apply_to_resources_map
-from .resources_matchers import CommentResourcesMatcher, HeuristicResourcesMatcher, HelmValuesResourcesMatcher, ResourcesMatcher, TargetMatch
-from .types import CommentTargetLoc, ForgejoRepo, HrDocLoc, RecommendedResources, ResourceRef, TargetKey, YamlDocBundle
+from .patching import _apply_to_resources_map, _cpu_qty, _mem_qty
+from .resources_matchers import CommentResourcesMatcher, HelmReleaseMatcher, ResourcesMatcher, TargetMatch
+from .types import CommentTargetLoc, ForgejoRepo, HrDocLoc, KrrTargetHint, RecommendedResources, ResourceRef, TargetKey, YamlDocBundle
 from .yaml_utils import _dump_all_yaml_docs, _read_all_yaml_docs
 
 
@@ -51,8 +51,6 @@ def _parse_args() -> argparse.Namespace:
 	ap.add_argument("--repo-url", default=None, help=f"Git repo URL or owner/repo shorthand to clone if REPO isn't present (env: {_env_key('REPO_URL')})")
 	ap.add_argument("--git-base-url", default=None, help=f"Base URL for owner/repo shorthand (env: {_env_key('GIT_BASE_URL')}; falls back to FORGEJO_URL or https://github.com)")
 	ap.add_argument("--clone-depth", type=int, default=None, help=f"Optional git clone --depth N (env: {_env_key('CLONE_DEPTH')})")
-	ap.add_argument("--chart-name", default=None, help=f"Chart name to match (env: {_env_key('CHART_NAME')})")
-	ap.add_argument("--chartref-kind", default=None, help=f"chartRef.kind to match (env: {_env_key('CHARTREF_KIND')})")
 	ap.add_argument("--min-severity", default=None, help=f"Min severity: OK/GOOD/WARNING/CRITICAL (env: {_env_key('MIN_SEVERITY')})")
 	ap.add_argument("--only-missing", action="store_true", default=None, help=f"Only set fields that are currently missing (env: {_env_key('ONLY_MISSING')})")
 	ap.add_argument("--no-name-fallback", action="store_true", default=None, help=f"Disable unique name-only matching fallback (env: {_env_key('NO_NAME_FALLBACK')})")
@@ -86,8 +84,6 @@ def _resolve_env_args(args: argparse.Namespace) -> argparse.Namespace:
 	clone_depth_s = _env_str("CLONE_DEPTH", "")
 	args.clone_depth = args.clone_depth if args.clone_depth is not None else (int(clone_depth_s) if clone_depth_s.strip().isdigit() else None)
 
-	args.chart_name = args.chart_name or _env_str("CHART_NAME", "app-template")
-	args.chartref_kind = args.chartref_kind or _env_str("CHARTREF_KIND", "OCIRepository")
 	args.min_severity = args.min_severity or _env_str("MIN_SEVERITY", "WARNING")
 
 	args.only_missing = args.only_missing if args.only_missing is not None else _env_bool("ONLY_MISSING", False)
@@ -154,6 +150,40 @@ def _record_yaml_error(
 	items.append(f"{path}: {op}: {type(err).__name__}: {err}")
 
 
+def _format_krr_rec(rec: Optional[RecommendedResources]) -> str:
+	if rec is None:
+		return ""
+	parts: List[str] = []
+
+	def _fmt(label: str, cur: Optional[float], new: Optional[float], fmt) -> None:
+		if new is None:
+			return
+		if cur is None:
+			parts.append(f"{label}={fmt(new)}")
+		else:
+			parts.append(f"{label}={fmt(cur)}->{fmt(new)}")
+
+	_fmt("req_cpu", rec.cur_req_cpu_cores, rec.req_cpu_cores, _cpu_qty)
+	_fmt("req_mem", rec.cur_req_mem_bytes, rec.req_mem_bytes, _mem_qty)
+	_fmt("lim_cpu", rec.cur_lim_cpu_cores, rec.lim_cpu_cores, _cpu_qty)
+	_fmt("lim_mem", rec.cur_lim_mem_bytes, rec.lim_mem_bytes, _mem_qty)
+	if not parts:
+		return ""
+	return f" krr:({', '.join(parts)})"
+
+
+def _format_change_notes(notes: List[str]) -> str:
+	change_bits = [n for n in notes if "->" in n and not n.startswith("SKIP:")]
+	return "; ".join(change_bits)
+
+
+def _format_label_with_changes(label: str, notes: List[str]) -> str:
+	change_summary = _format_change_notes(notes)
+	if not change_summary:
+		return label
+	return f"{label} — {change_summary}"
+
+
 def _apply_implied_flags(args: argparse.Namespace) -> None:
 	if args.pr:
 		args.write = True
@@ -194,8 +224,6 @@ def _build_hr_index(
 	repo_root: Path,
 	yaml_files: List[Path],
 	*,
-	chart_name: str,
-	chartref_kind: str,
 	yaml_issues: Dict[str, List[str]],
 ) -> Tuple[Dict[ResourceRef, List[HrDocLoc]], Dict[str, List[HrDocLoc]], Dict[TargetKey, List[CommentTargetLoc]]]:
 	hr_index: Dict[ResourceRef, List[HrDocLoc]] = {}
@@ -213,45 +241,43 @@ def _build_hr_index(
 			continue
 
 		for i, doc in enumerate(docs):
-			ref = None
-			if isinstance(doc, dict):
-				ref = _resource_ref_from_doc(doc)
+			is_hr = _is_helmrelease(doc)
+			ref = _resource_ref_from_doc(doc) if isinstance(doc, dict) else None
+			if ref is not None:
+				meta = doc.get("metadata") or {}
+				if (not meta.get("namespace")) and ref.namespace == "default":
+					guess = _infer_namespace_from_path(repo_root, fp)
+					if guess:
+						ref = ResourceRef(kind=ref.kind, namespace=guess, name=ref.name)
+			comment_ref = ref
+
+			if is_hr and ref is not None:
+				if not ref.name:
+					continue
+				comment_ref = ref
+
+				loc = HrDocLoc(path=fp, doc_index=i, doc=doc)
+				hr_index.setdefault(ref, []).append(loc)
+				hr_index_by_name.setdefault(ref.name, []).append(loc)
 
 			for match in _find_krr_comment_targets(doc, raw_lines=raw.splitlines()):
-				key = TargetKey(resource=ref, controller=match.controller, container=match.container)
+				key = TargetKey(resource=comment_ref, controller=match.controller, container=match.container)
 				loc = CommentTargetLoc(path=fp, doc_index=i, resources_path=match.resources_path)
 				comment_index.setdefault(key, []).append(loc)
 
-			if not _is_helmrelease(doc):
+			if not is_hr:
 				continue
-			if not _is_app_template_hr(doc, chart_name=chart_name, chartref_kind=chartref_kind):
-				continue
-
-			ref = _resource_ref_from_doc(doc)
-			if not ref.name:
-				continue
-
-			meta = doc.get("metadata") or {}
-			if (not meta.get("namespace")) and ref.namespace == "default":
-				guess = _infer_namespace_from_path(repo_root, fp)
-				if guess:
-					ref = ResourceRef(kind=ref.kind, namespace=guess, name=ref.name)
-
-			loc = HrDocLoc(path=fp, doc_index=i, doc=doc)
-			hr_index.setdefault(ref, []).append(loc)
-			hr_index_by_name.setdefault(ref.name, []).append(loc)
-
 	return hr_index, hr_index_by_name, comment_index
 
 
 def _apply_krr_to_repo(
 	repo_root: Path,
 	rec_map: Dict[TargetKey, RecommendedResources],
+	hints_map: Dict[TargetKey, KrrTargetHint],
 	hr_index: Dict[ResourceRef, List[HrDocLoc]],
 	hr_index_by_name: Dict[str, List[HrDocLoc]],
 	comment_index: Dict[TargetKey, List[CommentTargetLoc]],
 	*,
-	chart_name: str,
 	only_missing: bool,
 	no_name_fallback: bool,
 	yaml_issues: Dict[str, List[str]],
@@ -276,26 +302,17 @@ def _apply_krr_to_repo(
 		changed_files[fp] = (raw, docs, yaml)
 		return raw, docs, yaml
 
-	config = HELM_VALUES_CONFIGS.get(chart_name)
-	if config:
-		helm_values_matcher: ResourcesMatcher = HelmValuesResourcesMatcher(
-			hr_index=hr_index,
-			hr_index_by_name=hr_index_by_name,
-			no_name_fallback=no_name_fallback,
-			config=config,
-		)
-	else:
-		helm_values_matcher = HeuristicResourcesMatcher(
-			hr_index=hr_index,
-			hr_index_by_name=hr_index_by_name,
-			no_name_fallback=no_name_fallback,
-		)
+	helm_release_matcher: ResourcesMatcher = HelmReleaseMatcher(
+		hr_index=hr_index,
+		hr_index_by_name=hr_index_by_name,
+		no_name_fallback=no_name_fallback,
+	)
 	comment_matcher = CommentResourcesMatcher(comment_index=comment_index, repo_root=repo_root)
 
 	matched_targets: set[TargetKey] = set()
 	seen_resources: set[tuple[str, int, int]] = set()
 	total_changed_targets += _apply_with_matcher(
-		matcher=helm_values_matcher,
+		matcher=helm_release_matcher,
 		rec_map=rec_map,
 		ensure_loaded=_ensure_loaded,
 		only_missing=only_missing,
@@ -319,15 +336,14 @@ def _apply_krr_to_repo(
 	)
 
 	def _describe_unmatched(target: TargetKey) -> str:
-		if target.resource:
-			kind = target.resource.kind or "resource"
-			namespace = target.resource.namespace or "default"
-			name = target.resource.name or "unknown"
-		else:
-			kind = "resource"
-			namespace = "unknown"
-			name = "unknown"
-		return f"{kind} {namespace}/{name} controller={target.controller} container={target.container} (unmatched)"
+		hint = hints_map.get(target)
+		kind = (hint.kind if hint and hint.kind else None) or "resource"
+		namespace = (hint.namespace if hint and hint.namespace else None) or "unknown"
+		name = (hint.name if hint and hint.name else None) or "unknown"
+		controller_label = ""
+		if target.controller and target.controller != name:
+			controller_label = f" controller={target.controller}"
+		return f"{kind} {namespace}/{name}{controller_label} container={target.container} (unmatched){_format_krr_rec(rec_map.get(target))}"
 
 	unmatched = [
 		_describe_unmatched(target)
@@ -354,7 +370,7 @@ def _apply_with_matcher(
 
 	for target_match in matcher.iter_targets(rec_map):
 		target = target_match.target_key
-		target_id = matcher.describe_target(target)
+		target_id = matcher.describe_target(target) + _format_krr_rec(target_match.rec)
 
 		if target_match.rec is None:
 			skipped.append(f"{target_id} — no KRR match")
@@ -385,7 +401,7 @@ def _apply_with_matcher(
 		if matcher.summarize_per_match:
 			for outcome in outcomes:
 				if outcome.changed:
-					updated.append(outcome.label)
+					updated.append(_format_label_with_changes(outcome.label, outcome.notes))
 					changed_targets += 1
 				elif outcome.notes:
 					reason = "; ".join(outcome.notes)
@@ -398,7 +414,7 @@ def _apply_with_matcher(
 			for outcome in outcomes:
 				target_notes.extend(outcome.notes)
 			if target_changed:
-				updated.append(target_id)
+				updated.append(_format_label_with_changes(target_id, target_notes))
 				changed_targets += 1
 			elif target_notes:
 				reason = "; ".join(target_notes)
@@ -443,7 +459,7 @@ def _apply_to_target_matches(
 			outcomes.append(_MatchOutcome(label, False, notes))
 			continue
 
-		label = matcher.describe_match(target_match.target_key, doc)
+		label = matcher.describe_match(target_match.target_key, doc) + _format_krr_rec(target_match.rec)
 		resources, _, resolver_notes = matcher.resolve_resources(doc, target_match.target_key, loc)
 		if resolver_notes:
 			print(f"- {label} @ {loc.path.relative_to(repo_root)}")
@@ -787,7 +803,7 @@ def main() -> int:
 		print(f"ERROR: {e}", file=sys.stderr)
 		return 2
 
-	rec_map = _aggregate_krr(args.krr_json, min_severity=args.min_severity)
+	rec_map, hints_map = _aggregate_krr(args.krr_json, min_severity=args.min_severity)
 	if not rec_map:
 		print("No applicable KRR entries found (after severity filter).", file=sys.stderr)
 		return 2
@@ -803,18 +819,16 @@ def main() -> int:
 		hr_index, hr_index_by_name, comment_index = _build_hr_index(
 			repo_root,
 			yaml_files,
-			chart_name=args.chart_name,
-			chartref_kind=args.chartref_kind,
 			yaml_issues=yaml_issues,
 		)
 
 		changed_files, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
 			repo_root,
 			rec_map,
+			hints_map,
 			hr_index,
 			hr_index_by_name,
 			comment_index,
-			chart_name=args.chart_name,
 			only_missing=args.only_missing,
 			no_name_fallback=args.no_name_fallback,
 			yaml_issues=yaml_issues,

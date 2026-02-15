@@ -6,7 +6,8 @@ from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 from ruamel.yaml.comments import CommentedMap
 
-from .patching import HelmValuesConfig, _resolve_helm_values_resources
+from .hr import _chart_name_from_hr
+from .patching import HELM_VALUES_CONFIGS, _resolve_helm_values_resources
 from .types import CommentTargetLoc, HrDocLoc, RecommendedResources, ResourceRef, TargetKey
 
 
@@ -53,97 +54,8 @@ class ResourcesMatcher(Protocol):
 		...
 
 
-class HelmValuesResourcesMatcher:
-	name = "helm-values"
-	summarize_per_match = False
-
-	def __init__(
-		self,
-		*,
-		hr_index: Dict[ResourceRef, List[HrDocLoc]],
-		hr_index_by_name: Dict[str, List[HrDocLoc]],
-		no_name_fallback: bool,
-		config: HelmValuesConfig,
-	) -> None:
-		self._hr_index = hr_index
-		self._hr_index_by_name = hr_index_by_name
-		self._no_name_fallback = no_name_fallback
-		self._config = config
-
-	def iter_targets(self, rec_map: Dict[object, RecommendedResources]) -> Iterable[TargetMatch]:
-		for target, rec in rec_map.items():
-			if not isinstance(target, TargetKey) or target.resource is None:
-				continue
-			if target.resource.kind != "HelmRelease":
-				continue
-			locs = self._hr_index.get(target.resource)
-			info_notes: List[str] = []
-
-			if not locs and not self._no_name_fallback:
-				cands = self._hr_index_by_name.get(target.resource.name, [])
-				if len(cands) == 1:
-					locs = cands
-					info_notes.append(
-						f"NOTE: matched {target.resource.namespace}/{target.resource.name} by name-only (manifest likely missing metadata.namespace)."
-					)
-				else:
-					locs = None
-
-			match = None
-			if locs:
-				match = MatchResult(
-					locs=[ResourcesMatch(path=loc.path, doc_index=loc.doc_index) for loc in locs],
-					info_notes=info_notes,
-				)
-			yield TargetMatch(target_key=target, rec=rec, match=match)
-
-	def describe_target(self, target_key: object) -> str:
-		target = target_key
-		if not isinstance(target, TargetKey) or target.resource is None:
-			raise ValueError("helm-values matcher requires TargetKey with resource set")
-		if target.resource.kind != "HelmRelease":
-			raise ValueError("helm-values matcher requires HelmRelease targets")
-		return _format_match_label(
-			kind=target.resource.kind,
-			namespace=target.resource.namespace,
-			name=target.resource.name,
-			controller=target.controller,
-			container=target.container,
-			matcher=self.name,
-		)
-
-	def describe_match(self, target_key: object, doc: CommentedMap) -> str:
-		target = target_key
-		if not isinstance(target, TargetKey) or target.resource is None:
-			raise ValueError("helm-values matcher requires TargetKey with resource set")
-		if target.resource.kind != "HelmRelease":
-			raise ValueError("helm-values matcher requires HelmRelease targets")
-		kind, namespace, name = _resource_identity(doc)
-		return _format_match_label(
-			kind=kind or target.resource.kind,
-			namespace=namespace or target.resource.namespace,
-			name=name or target.resource.name,
-			controller=target.controller,
-			container=target.container,
-			matcher=self.name,
-		)
-
-	def resolve_resources(
-		self,
-		doc: CommentedMap,
-		target_key: object,
-		match: ResourcesMatch,
-	) -> Tuple[Optional[CommentedMap], bool, List[str]]:
-		target = target_key
-		if not isinstance(target, TargetKey) or target.resource is None:
-			raise ValueError("helm-values matcher requires TargetKey with resource set")
-		if target.resource.kind != "HelmRelease":
-			raise ValueError("helm-values matcher requires HelmRelease targets")
-		return _resolve_helm_values_resources(doc, target=target, create_missing=True, config=self._config)
-
-
-class HeuristicResourcesMatcher:
-	name = "helm-values-heuristic"
+class HelmReleaseMatcher:
+	name = "helmrelease"
 	summarize_per_match = False
 
 	def __init__(
@@ -156,10 +68,10 @@ class HeuristicResourcesMatcher:
 		self._hr_index = hr_index
 		self._hr_index_by_name = hr_index_by_name
 		self._no_name_fallback = no_name_fallback
+		self._configs = HELM_VALUES_CONFIGS
 		self._target_counts_by_resource: Dict[ResourceRef, int] = {}
 
 	def iter_targets(self, rec_map: Dict[object, RecommendedResources]) -> Iterable[TargetMatch]:
-		# TODO: heuristic matching for resources blocks when no chart config is available.
 		self._target_counts_by_resource = {}
 		for target in rec_map.keys():
 			if not isinstance(target, TargetKey) or target.resource is None:
@@ -197,9 +109,9 @@ class HeuristicResourcesMatcher:
 	def describe_target(self, target_key: object) -> str:
 		target = target_key
 		if not isinstance(target, TargetKey) or target.resource is None:
-			raise ValueError("helm-values heuristic matcher requires TargetKey with resource set")
+			raise ValueError("helmrelease matcher requires TargetKey with resource set")
 		if target.resource.kind != "HelmRelease":
-			raise ValueError("helm-values heuristic matcher requires HelmRelease targets")
+			raise ValueError("helmrelease matcher requires HelmRelease targets")
 		return _format_match_label(
 			kind=target.resource.kind,
 			namespace=target.resource.namespace,
@@ -212,9 +124,9 @@ class HeuristicResourcesMatcher:
 	def describe_match(self, target_key: object, doc: CommentedMap) -> str:
 		target = target_key
 		if not isinstance(target, TargetKey) or target.resource is None:
-			raise ValueError("helm-values heuristic matcher requires TargetKey with resource set")
+			raise ValueError("helmrelease matcher requires TargetKey with resource set")
 		if target.resource.kind != "HelmRelease":
-			raise ValueError("helm-values heuristic matcher requires HelmRelease targets")
+			raise ValueError("helmrelease matcher requires HelmRelease targets")
 		kind, namespace, name = _resource_identity(doc)
 		return _format_match_label(
 			kind=kind or target.resource.kind,
@@ -233,9 +145,16 @@ class HeuristicResourcesMatcher:
 	) -> Tuple[Optional[CommentedMap], bool, List[str]]:
 		target = target_key
 		if not isinstance(target, TargetKey) or target.resource is None:
-			raise ValueError("helm-values heuristic matcher requires TargetKey with resource set")
+			raise ValueError("helmrelease matcher requires TargetKey with resource set")
 		if target.resource.kind != "HelmRelease":
-			raise ValueError("helm-values heuristic matcher requires HelmRelease targets")
+			raise ValueError("helmrelease matcher requires HelmRelease targets")
+		chart_name = _chart_name_from_hr(doc)
+		if chart_name:
+			config = self._configs.get(chart_name)
+			if config:
+				return _resolve_helm_values_resources(doc, target=target, create_missing=True, config=config)
+
+		# Heuristic matching for non-app-template HelmReleases.
 		count = self._target_counts_by_resource.get(target.resource, 0)
 		if count != 1:
 			return None, False, ["SKIP: heuristic requires a single workload for this HelmRelease"]
@@ -382,6 +301,10 @@ def _merge_recs(recs: List[RecommendedResources]) -> RecommendedResources:
 		out.req_mem_bytes = _merge_max(out.req_mem_bytes, rec.req_mem_bytes)
 		out.lim_cpu_cores = _merge_max(out.lim_cpu_cores, rec.lim_cpu_cores)
 		out.lim_mem_bytes = _merge_max(out.lim_mem_bytes, rec.lim_mem_bytes)
+		out.cur_req_cpu_cores = _merge_max(out.cur_req_cpu_cores, rec.cur_req_cpu_cores)
+		out.cur_req_mem_bytes = _merge_max(out.cur_req_mem_bytes, rec.cur_req_mem_bytes)
+		out.cur_lim_cpu_cores = _merge_max(out.cur_lim_cpu_cores, rec.cur_lim_cpu_cores)
+		out.cur_lim_mem_bytes = _merge_max(out.cur_lim_mem_bytes, rec.cur_lim_mem_bytes)
 	return out
 
 
@@ -397,4 +320,7 @@ def _format_match_label(
 	kind_label = kind or "resource"
 	ns_label = namespace or "default"
 	name_label = name or "unknown"
-	return f"{kind_label} {ns_label}/{name_label} controller={controller} container={container} ({matcher})"
+	controller_label = ""
+	if controller and controller != name_label:
+		controller_label = f" controller={controller}"
+	return f"{kind_label} {ns_label}/{name_label}{controller_label} container={container} ({matcher})"

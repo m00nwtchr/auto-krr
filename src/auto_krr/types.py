@@ -22,12 +22,23 @@ class TargetKey:
 	container: str
 
 
+@dataclass(frozen=True)
+class KrrTargetHint:
+	kind: Optional[str]
+	namespace: Optional[str]
+	name: Optional[str]
+
+
 @dataclass
 class RecommendedResources:
 	req_cpu_cores: Optional[float] = None
 	req_mem_bytes: Optional[float] = None
 	lim_cpu_cores: Optional[float] = None
 	lim_mem_bytes: Optional[float] = None
+	cur_req_cpu_cores: Optional[float] = None
+	cur_req_mem_bytes: Optional[float] = None
+	cur_lim_cpu_cores: Optional[float] = None
+	cur_lim_mem_bytes: Optional[float] = None
 
 
 @dataclass

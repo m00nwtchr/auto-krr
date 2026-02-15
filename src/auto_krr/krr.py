@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
-from .types import RecommendedResources, ResourceRef, TargetKey
+from .types import KrrTargetHint, RecommendedResources, ResourceRef, TargetKey
 
 
 def _safe_float(v: Any) -> Optional[float]:
@@ -26,6 +26,7 @@ def _safe_float(v: Any) -> Optional[float]:
 
 def _extract_rec(scan: Dict[str, Any]) -> RecommendedResources:
 	rec = scan.get("recommended") or {}
+	alloc = (scan.get("object") or {}).get("allocations") or {}
 	out = RecommendedResources()
 
 	def _num(section: str, resource: str) -> Optional[float]:
@@ -39,10 +40,22 @@ def _extract_rec(scan: Dict[str, Any]) -> RecommendedResources:
 			return None
 		return _safe_float(res.get("value"))
 
+	def _alloc(section: str, resource: str) -> Optional[float]:
+		if not isinstance(alloc, dict):
+			return None
+		sec = alloc.get(section)
+		if not isinstance(sec, dict):
+			return None
+		return _safe_float(sec.get(resource))
+
 	out.req_cpu_cores = _num("requests", "cpu")
 	out.req_mem_bytes = _num("requests", "memory")
 	out.lim_cpu_cores = _num("limits", "cpu")
 	out.lim_mem_bytes = _num("limits", "memory")
+	out.cur_req_cpu_cores = _alloc("requests", "cpu")
+	out.cur_req_mem_bytes = _alloc("requests", "memory")
+	out.cur_lim_cpu_cores = _alloc("limits", "cpu")
+	out.cur_lim_mem_bytes = _alloc("limits", "memory")
 	return out
 
 
@@ -58,10 +71,11 @@ def _aggregate_krr(
 	json_path: Path,
 	*,
 	min_severity: str,
-) -> Dict[TargetKey, RecommendedResources]:
+) -> Tuple[Dict[TargetKey, RecommendedResources], Dict[TargetKey, KrrTargetHint]]:
 	data = json.loads(json_path.read_text(encoding="utf-8"))
 	scans = data.get("scans") or []
 	out: Dict[TargetKey, RecommendedResources] = {}
+	hints: Dict[TargetKey, KrrTargetHint] = {}
 
 	severity_rank = {
 		"UNKNOWN": -1,
@@ -87,11 +101,10 @@ def _aggregate_krr(
 		hr_name = labels.get("helm.toolkit.fluxcd.io/name")
 		hr_ns = labels.get("helm.toolkit.fluxcd.io/namespace")
 
-		controller = (
+		controller = obj.get("name") or (
 			labels.get("app.kubernetes.io/controller")
 			or labels.get("app.kubernetes.io/name")
 			or labels.get("app.kubernetes.io/instance")
-			or obj.get("name")
 			or ""
 		)
 		controller = str(controller)
@@ -123,5 +136,40 @@ def _aggregate_krr(
 			prev.req_mem_bytes = _merge_max(prev.req_mem_bytes, rec.req_mem_bytes)
 			prev.lim_cpu_cores = _merge_max(prev.lim_cpu_cores, rec.lim_cpu_cores)
 			prev.lim_mem_bytes = _merge_max(prev.lim_mem_bytes, rec.lim_mem_bytes)
+			prev.cur_req_cpu_cores = _merge_max(prev.cur_req_cpu_cores, rec.cur_req_cpu_cores)
+			prev.cur_req_mem_bytes = _merge_max(prev.cur_req_mem_bytes, rec.cur_req_mem_bytes)
+			prev.cur_lim_cpu_cores = _merge_max(prev.cur_lim_cpu_cores, rec.cur_lim_cpu_cores)
+			prev.cur_lim_mem_bytes = _merge_max(prev.cur_lim_mem_bytes, rec.cur_lim_mem_bytes)
 
-	return out
+		kind = str(obj.get("kind") or "") or None
+		namespace = str(obj.get("namespace") or "") or None
+		name = str(obj.get("name") or "") or None
+		hints[target_key] = _merge_hint(hints.get(target_key), kind=kind, namespace=namespace, name=name)
+
+	return out, hints
+
+
+def _merge_hint(
+	current: Optional[KrrTargetHint],
+	*,
+	kind: Optional[str],
+	namespace: Optional[str],
+	name: Optional[str],
+) -> KrrTargetHint:
+	if current is None:
+		return KrrTargetHint(kind=kind, namespace=namespace, name=name)
+	return KrrTargetHint(
+		kind=_merge_hint_value(current.kind, kind),
+		namespace=_merge_hint_value(current.namespace, namespace),
+		name=_merge_hint_value(current.name, name),
+	)
+
+
+def _merge_hint_value(current: Optional[str], new: Optional[str]) -> Optional[str]:
+	if current is None:
+		return new
+	if new is None:
+		return current
+	if current == new:
+		return current
+	return None

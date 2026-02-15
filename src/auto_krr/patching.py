@@ -35,30 +35,32 @@ def _find_key_by_str(m: CommentedMap, wanted: str) -> Optional[object]:
 	return None
 
 
-def _pick_controller_key(controllers: CommentedMap, wanted: str, hr_name: str) -> Optional[object]:
+def _pick_controller_key(controllers: CommentedMap, wanted: str, hr_name: str, config: HelmValuesConfig) -> Optional[object]:
 	k = _find_key_by_str(controllers, wanted)
 	if k is not None:
 		return k
-	k = _find_key_by_str(controllers, "main")
-	if k is not None:
-		return k
-	k = _find_key_by_str(controllers, hr_name)
-	if k is not None:
-		return k
-	if len(controllers.keys()) == 1:
+	for fb in config.controller_fallbacks:
+		k = _find_key_by_str(controllers, fb)
+		if k is not None:
+			return k
+	if config.allow_controller_name:
+		k = _find_key_by_str(controllers, hr_name)
+		if k is not None:
+			return k
+	if config.allow_single_controller and len(controllers.keys()) == 1:
 		return next(iter(controllers.keys()))
 	return None
 
 
-def _pick_container_key(containers: CommentedMap, wanted: str) -> Optional[object]:
+def _pick_container_key(containers: CommentedMap, wanted: str, config: HelmValuesConfig) -> Optional[object]:
 	k = _find_key_by_str(containers, wanted)
 	if k is not None:
 		return k
-	for fb in ("app", "main"):
+	for fb in config.container_fallbacks:
 		k = _find_key_by_str(containers, fb)
 		if k is not None:
 			return k
-	if len(containers.keys()) == 1:
+	if config.allow_single_container and len(containers.keys()) == 1:
 		return next(iter(containers.keys()))
 	return None
 
@@ -94,18 +96,41 @@ def _apply_to_hr_doc(
 
 @dataclass(frozen=True)
 class HelmValuesConfig:
+	"""Describe how to locate and update resources within a chart's Helm values."""
+	# chart_name: name used in HelmRelease chartRef/spec to select this config.
+	chart_name: str
+	# controllers_path: path to the controllers map (e.g. spec.values.controllers).
 	controllers_path: List[str]
+	# containers_key: key holding containers under a controller.
 	containers_key: str
+	# resources_key: key to update under a container.
 	resources_key: str
+	# containers_after_keys: ordering hints when inserting resources.
 	containers_after_keys: List[str]
+	# controller_fallbacks: fallback controller names to try in order.
+	controller_fallbacks: List[str]
+	# container_fallbacks: fallback container names to try in order.
+	container_fallbacks: List[str]
+	# allow_controller_name: allow using the HelmRelease name as a controller fallback.
+	allow_controller_name: bool
+	# allow_single_controller: allow the only controller when there is a single entry.
+	allow_single_controller: bool
+	# allow_single_container: allow the only container when there is a single entry.
+	allow_single_container: bool
 
 
 HELM_VALUES_CONFIGS = {
 	"app-template": HelmValuesConfig(
+		chart_name="app-template",
 		controllers_path=["spec", "values", "controllers"],
 		containers_key="containers",
 		resources_key="resources",
 		containers_after_keys=["pod", "cronjob", "statefulset", "deployment", "type"],
+		controller_fallbacks=["main"],
+		container_fallbacks=["app", "main"],
+		allow_controller_name=True,
+		allow_single_controller=True,
+		allow_single_container=True,
 	),
 }
 
@@ -132,7 +157,7 @@ def _resolve_helm_values_resources(
 		return None, changed, ["SKIP: spec.values.controllers is not a mapping"]
 
 	resource_name = target.resource.name if target.resource else ""
-	ctrl_key = _pick_controller_key(controllers, target.controller, resource_name)
+	ctrl_key = _pick_controller_key(controllers, target.controller, resource_name, config)
 	if ctrl_key is None:
 		notes.append(f"SKIP: controller {target.controller!r} not found (controllers: {[str(k) for k in controllers.keys()]})")
 		return None, changed, notes
@@ -149,7 +174,7 @@ def _resolve_helm_values_resources(
 	if not isinstance(containers, CommentedMap):
 		return None, changed, [f"SKIP: {config.containers_key} is not a mapping"]
 
-	ctr_key = _pick_container_key(containers, target.container)
+	ctr_key = _pick_container_key(containers, target.container, config)
 	if ctr_key is None:
 		notes.append(f"SKIP: container {target.container!r} not found (containers: {[str(k) for k in containers.keys()]})")
 		return None, changed, notes
