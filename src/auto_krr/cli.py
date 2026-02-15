@@ -739,7 +739,7 @@ def _maybe_create_pr(
 				_run_git(repo_root, ["reset", "--hard", f"{args.remote}/{base_branch}"])
 				print("REBASE CONFLICT: discarded local changes, will re-apply.")
 				return 3
-			_git_push_set_upstream(repo_root, args.remote, head_branch)
+			_git_push_set_upstream(repo_root, args.remote, head_branch, force_with_lease=True)
 			print(f"PUSHED: {args.remote}/{head_branch}")
 			body = _format_pr_body(summary, unmatched)
 			pr_data = _forgejo_find_open_pr_data(
@@ -764,7 +764,7 @@ def _maybe_create_pr(
 			print(f"PR EXISTS: {existing}")
 			return 0
 
-		_git_push_set_upstream(repo_root, args.remote, head_branch)
+		_git_push_set_upstream(repo_root, args.remote, head_branch, force_with_lease=True)
 		print(f"PUSHED: {args.remote}/{head_branch}")
 
 		body = _format_pr_body(summary, unmatched)

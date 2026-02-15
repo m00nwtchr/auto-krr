@@ -190,8 +190,11 @@ def _git_checkout_new(repo_root: Path, branch: str, base: str) -> None:
 	_run_git(repo_root, ["checkout", "-b", branch])
 
 
-def _git_push_set_upstream(repo_root: Path, remote: str, branch: str) -> None:
-	_run_git(repo_root, ["push", "-u", remote, branch])
+def _git_push_set_upstream(repo_root: Path, remote: str, branch: str, *, force_with_lease: bool = False) -> None:
+	args = ["push", "-u", remote, branch]
+	if force_with_lease:
+		args.insert(1, "--force-with-lease")
+	_run_git(repo_root, args)
 
 
 def _ensure_git_http_auth(
