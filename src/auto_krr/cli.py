@@ -29,7 +29,7 @@ from .comment_targets import _find_krr_comment_targets
 from .hr import _hr_ref_from_doc, _infer_namespace_from_path, _is_app_template_hr, _is_helmrelease
 from .krr import _aggregate_krr
 from .patching import HELM_VALUES_CONFIGS, _apply_to_resources_map
-from .resources_matchers import CommentResourcesMatcher, HelmValuesResourcesMatcher, ResourcesMatcher, TargetMatch
+from .resources_matchers import CommentResourcesMatcher, HeuristicResourcesMatcher, HelmValuesResourcesMatcher, ResourcesMatcher, TargetMatch
 from .types import CommentTargetKey, CommentTargetLoc, ForgejoRepo, HrDocLoc, HrRef, RecommendedResources, TargetKey, YamlDocBundle
 from .yaml_utils import _dump_all_yaml_docs, _read_all_yaml_docs
 
@@ -240,6 +240,7 @@ def _apply_krr_to_repo(
 	hr_index_by_name: Dict[str, List[HrDocLoc]],
 	comment_index: Dict[CommentTargetKey, List[CommentTargetLoc]],
 	*,
+	chart_name: str,
 	only_missing: bool,
 	no_name_fallback: bool,
 	yaml_issues: Dict[str, List[str]],
@@ -264,12 +265,20 @@ def _apply_krr_to_repo(
 		changed_files[fp] = (raw, docs, yaml)
 		return raw, docs, yaml
 
-	helm_values_matcher = HelmValuesResourcesMatcher(
-		hr_index=hr_index,
-		hr_index_by_name=hr_index_by_name,
-		no_name_fallback=no_name_fallback,
-		config=HELM_VALUES_CONFIGS["app-template"],
-	)
+	config = HELM_VALUES_CONFIGS.get(chart_name)
+	if config:
+		helm_values_matcher: ResourcesMatcher = HelmValuesResourcesMatcher(
+			hr_index=hr_index,
+			hr_index_by_name=hr_index_by_name,
+			no_name_fallback=no_name_fallback,
+			config=config,
+		)
+	else:
+		helm_values_matcher = HeuristicResourcesMatcher(
+			hr_index=hr_index,
+			hr_index_by_name=hr_index_by_name,
+			no_name_fallback=no_name_fallback,
+		)
 	comment_matcher = CommentResourcesMatcher(comment_index=comment_index, repo_root=repo_root)
 
 	total_changed_targets += _apply_with_matcher(
@@ -671,6 +680,7 @@ def main() -> int:
 		hr_index,
 		hr_index_by_name,
 		comment_index,
+		chart_name=args.chart_name,
 		only_missing=args.only_missing,
 		no_name_fallback=args.no_name_fallback,
 		yaml_issues=yaml_issues,
