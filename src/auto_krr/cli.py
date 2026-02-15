@@ -158,10 +158,8 @@ def _format_krr_rec(rec: Optional[RecommendedResources]) -> str:
 	def _fmt(label: str, cur: Optional[float], new: Optional[float], fmt) -> None:
 		if new is None:
 			return
-		if cur is None:
-			parts.append(f"{label}={fmt(new)}")
-		else:
-			parts.append(f"{label}={fmt(cur)}->{fmt(new)}")
+		old_val = "none" if cur is None else fmt(cur)
+		parts.append(f"{label}={old_val}->{fmt(new)}")
 
 	_fmt("req_cpu", rec.cur_req_cpu_cores, rec.req_cpu_cores, _cpu_qty)
 	_fmt("req_mem", rec.cur_req_mem_bytes, rec.req_mem_bytes, _mem_qty)
@@ -169,19 +167,52 @@ def _format_krr_rec(rec: Optional[RecommendedResources]) -> str:
 	_fmt("lim_mem", rec.cur_lim_mem_bytes, rec.lim_mem_bytes, _mem_qty)
 	if not parts:
 		return ""
-	return f" krr:({', '.join(parts)})"
+	return f" changes:({', '.join(parts)})"
 
 
 def _format_change_notes(notes: List[str]) -> str:
-	change_bits = [n for n in notes if "->" in n and not n.startswith("SKIP:")]
-	return "; ".join(change_bits)
+	changes: dict[str, tuple[str, str]] = {}
+	key_map = {
+		"requests.cpu": "req_cpu",
+		"requests.memory": "req_mem",
+		"limits.cpu": "lim_cpu",
+		"limits.memory": "lim_mem",
+	}
+	for note in notes:
+		if note.startswith("SKIP:"):
+			continue
+		if "->" not in note:
+			continue
+		left, right = note.split("->", 1)
+		left = left.strip()
+		right = right.strip()
+		if ":" not in left:
+			continue
+		field, old_val = left.split(":", 1)
+		field = field.strip()
+		key = key_map.get(field)
+		if not key:
+			continue
+		old_val = old_val.strip().strip("'\"")
+		new_val = right.strip().strip("'\"")
+		if old_val in ("None", "null", ""):
+			old_val = "none"
+		if new_val in ("None", "null", ""):
+			new_val = "none"
+		changes[key] = (old_val, new_val)
+
+	order = ("req_cpu", "req_mem", "lim_cpu", "lim_mem")
+	parts = [f"{key}={changes[key][0]}->{changes[key][1]}" for key in order if key in changes]
+	if not parts:
+		return ""
+	return f" changes:({', '.join(parts)})"
 
 
 def _format_label_with_changes(label: str, notes: List[str]) -> str:
 	change_summary = _format_change_notes(notes)
 	if not change_summary:
 		return label
-	return f"{label} — {change_summary}"
+	return f"{label} {change_summary}"
 
 
 def _apply_implied_flags(args: argparse.Namespace) -> None:
@@ -343,7 +374,10 @@ def _apply_krr_to_repo(
 		controller_label = ""
 		if target.controller and target.controller != name:
 			controller_label = f" controller={target.controller}"
-		return f"{kind} {namespace}/{name}{controller_label} container={target.container} (unmatched){_format_krr_rec(rec_map.get(target))}"
+		change_summary = _format_krr_rec(rec_map.get(target))
+		if change_summary:
+			change_summary = f" {change_summary}"
+		return f"{kind} {namespace}/{name}{controller_label} container={target.container} (unmatched){change_summary}"
 
 	unmatched = [
 		_describe_unmatched(target)
@@ -370,7 +404,7 @@ def _apply_with_matcher(
 
 	for target_match in matcher.iter_targets(rec_map):
 		target = target_match.target_key
-		target_id = matcher.describe_target(target) + _format_krr_rec(target_match.rec)
+		target_id = matcher.describe_target(target)
 
 		if target_match.rec is None:
 			skipped.append(f"{target_id} — no KRR match")
@@ -459,7 +493,7 @@ def _apply_to_target_matches(
 			outcomes.append(_MatchOutcome(label, False, notes))
 			continue
 
-		label = matcher.describe_match(target_match.target_key, doc) + _format_krr_rec(target_match.rec)
+		label = matcher.describe_match(target_match.target_key, doc)
 		resources, _, resolver_notes = matcher.resolve_resources(doc, target_match.target_key, loc)
 		if resolver_notes:
 			print(f"- {label} @ {loc.path.relative_to(repo_root)}")
