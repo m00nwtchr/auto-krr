@@ -281,13 +281,16 @@ def _apply_krr_to_repo(
 		)
 	comment_matcher = CommentResourcesMatcher(comment_index=comment_index, repo_root=repo_root)
 
+	matched_targets: set[str] = set()
+	seen_resources: set[tuple[str, int, int]] = set()
 	total_changed_targets += _apply_with_matcher(
 		matcher=helm_values_matcher,
 		rec_map=krr_map,
 		ensure_loaded=_ensure_loaded,
 		only_missing=only_missing,
 		repo_root=repo_root,
-		unmatched=unmatched,
+		matched_targets=matched_targets,
+		seen_resources=seen_resources,
 		updated=updated,
 		skipped=skipped,
 	)
@@ -298,10 +301,17 @@ def _apply_krr_to_repo(
 		ensure_loaded=_ensure_loaded,
 		only_missing=only_missing,
 		repo_root=repo_root,
-		unmatched=None,
+		matched_targets=None,
+		seen_resources=seen_resources,
 		updated=updated,
 		skipped=skipped,
 	)
+
+	unmatched = [
+		helm_values_matcher.describe_target(target)
+		for target in krr_map.keys()
+		if helm_values_matcher.describe_target(target) not in matched_targets
+	]
 
 	return changed_files, total_changed_targets, unmatched, {"updated": updated, "skipped": skipped}
 
@@ -313,7 +323,8 @@ def _apply_with_matcher(
 	ensure_loaded,
 	only_missing: bool,
 	repo_root: Path,
-	unmatched: Optional[List[str]],
+	matched_targets: Optional[set[str]],
+	seen_resources: set[tuple[str, int, int]],
 	updated: List[str],
 	skipped: List[str],
 ) -> int:
@@ -328,11 +339,12 @@ def _apply_with_matcher(
 			continue
 
 		if not target_match.match or not target_match.match.locs:
-			if unmatched is not None:
-				unmatched.append(target_id)
-			else:
+			if matched_targets is None:
 				skipped.append(f"{target_id} — no matching resources")
 			continue
+
+		if matched_targets is not None:
+			matched_targets.add(target_id)
 
 		for note in target_match.match.info_notes:
 			print(note)
@@ -344,6 +356,7 @@ def _apply_with_matcher(
 			ensure_loaded=ensure_loaded,
 			only_missing=only_missing,
 			repo_root=repo_root,
+			seen_resources=seen_resources,
 		)
 
 		if matcher.summarize_per_match:
@@ -388,6 +401,7 @@ def _apply_to_target_matches(
 	ensure_loaded,
 	only_missing: bool,
 	repo_root: Path,
+	seen_resources: set[tuple[str, int, int]],
 ) -> List[_MatchOutcome]:
 	outcomes: List[_MatchOutcome] = []
 
@@ -415,8 +429,16 @@ def _apply_to_target_matches(
 		combined_notes = list(resolver_notes)
 
 		if resources is None:
+			if not combined_notes:
+				combined_notes.append("SKIP: matched workload but no resources block found")
 			outcomes.append(_MatchOutcome(label, False, combined_notes))
 			continue
+		res_key = (str(loc.path), loc.doc_index, id(resources))
+		if res_key in seen_resources:
+			combined_notes.append("SKIP: resources block already matched")
+			outcomes.append(_MatchOutcome(label, False, combined_notes))
+			continue
+		seen_resources.add(res_key)
 
 		changed, res_notes = _apply_to_resources_map(
 			resources,

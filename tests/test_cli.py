@@ -3,7 +3,7 @@ from pathlib import Path
 from ruamel.yaml.comments import CommentedMap
 
 from auto_krr.cli import _apply_krr_to_repo, _build_hr_index, _format_cli_summary, _format_pr_body
-from auto_krr.types import HrRef, RecommendedResources, TargetKey
+from auto_krr.types import CommentTargetKey, HrRef, RecommendedResources, TargetKey
 from auto_krr.yaml_utils import _read_all_yaml_docs
 
 
@@ -138,3 +138,53 @@ spec:
 	assert total_changed == 1
 	assert unmatched == []
 	assert any("demo" in item for item in summary["updated"])
+
+
+def test_apply_krr_to_repo_dedup_resources_blocks(tmp_path: Path) -> None:
+	# Intended behavior: only apply one matcher per resources block, even if multiple match.
+	manifest = """\
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: demo
+  namespace: default
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: custom-chart
+  values:
+    resources: # krr: controller=main container=app
+      requests:
+        cpu: 10m
+"""
+	path = _write_yaml(tmp_path, "hr.yaml", manifest)
+
+	hr_index, hr_index_by_name, comment_index = _build_hr_index(
+		tmp_path,
+		[path],
+		chart_name="custom-chart",
+		chartref_kind="OCIRepository",
+		yaml_issues={"warnings": [], "errors": []},
+	)
+
+	target = TargetKey(hr=HrRef(namespace="default", name="demo"), controller="main", container="app")
+	krr_map = {target: RecommendedResources(req_cpu_cores=0.5)}
+	comment_map = {CommentTargetKey(controller="main", container="app"): RecommendedResources(req_cpu_cores=0.6)}
+
+	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
+		tmp_path,
+		krr_map,
+		comment_map=comment_map,
+		hr_index=hr_index,
+		hr_index_by_name=hr_index_by_name,
+		comment_index=comment_index,
+		chart_name="custom-chart",
+		only_missing=False,
+		no_name_fallback=True,
+		yaml_issues={"warnings": [], "errors": []},
+	)
+
+	assert path in changed_files
+	assert total_changed == 1
+	assert unmatched == []
+	assert any("resources block already matched" in item for item in summary["skipped"])
