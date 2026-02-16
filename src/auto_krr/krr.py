@@ -103,9 +103,9 @@ def _aggregate_krr(
 
 		controller = (
 			labels.get("app.kubernetes.io/controller")
+			or obj.get("name")
 			or labels.get("app.kubernetes.io/name")
 			or labels.get("app.kubernetes.io/instance")
-			or obj.get("name")
 			or ""
 		)
 		controller = str(controller)
