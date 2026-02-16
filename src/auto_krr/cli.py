@@ -828,8 +828,17 @@ def _copy_changed_paths(*, src_root: Path, dest_root: Path, changed_paths: set[P
 	for src_path in changed_paths:
 		rel = src_path.relative_to(src_root)
 		dest_path = dest_root / rel
+		if not src_path.exists():
+			if dest_path.exists():
+				dest_path.unlink()
+				actually_changed.append(dest_path)
+			continue
 		new_txt = src_path.read_text(encoding="utf-8")
-		old_txt = dest_path.read_text(encoding="utf-8")
+		if dest_path.exists():
+			old_txt = dest_path.read_text(encoding="utf-8")
+		else:
+			dest_path.parent.mkdir(parents=True, exist_ok=True)
+			old_txt = ""
 		if new_txt != old_txt:
 			dest_path.write_text(new_txt, encoding="utf-8")
 			actually_changed.append(dest_path)
@@ -1141,20 +1150,32 @@ def main() -> int:
 
 				if _is_git_repo(repo_root):
 					_run_git(repo_root, ["checkout", head_branch])
+					if _git_ref_exists(repo_root, "MERGE_HEAD"):
+						_run_git(repo_root, ["merge", "--abort"], check=False)
+					if _git_is_dirty(repo_root) and not args.allow_dirty:
+						print("DIRTY WORKTREE: aborting to avoid overwriting local changes; retry after cleaning or use --allow-dirty.", file=sys.stderr)
+						return 3
 					try:
 						_run_git(repo_root, ["fetch", args.remote, base_branch])
-						merge = _run_git(
+						fast_forward = _run_git(
 							repo_root,
-							["merge", "--no-edit", "--autostash", "FETCH_HEAD"],
+							["merge", "--ff-only", "FETCH_HEAD"],
 							check=False,
 						)
-						if merge.returncode != 0:
-							if _git_ref_exists(repo_root, "MERGE_HEAD"):
-								_run_git(repo_root, ["merge", "--abort"], check=False)
-							print("MERGE CONFLICT: failed to update branch with base; retrying.")
-							if merge.stderr.strip():
-								print(merge.stderr.strip())
-							return 3
+						if fast_forward.returncode != 0:
+							_ensure_git_identity(repo_root, forgejo_url=args.forgejo_url)
+							merge = _run_git(
+								repo_root,
+								["merge", "--no-edit", "--autostash", "FETCH_HEAD"],
+								check=False,
+							)
+							if merge.returncode != 0:
+								if _git_ref_exists(repo_root, "MERGE_HEAD"):
+									_run_git(repo_root, ["merge", "--abort"], check=False)
+								print("MERGE CONFLICT: failed to update branch with base; retrying.")
+								if merge.stderr.strip():
+									print(merge.stderr.strip())
+								return 3
 					except Exception:
 						print("MERGE ERROR: failed to update branch with base; retrying.")
 						return 3
