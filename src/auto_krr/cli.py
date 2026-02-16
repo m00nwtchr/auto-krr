@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime
 import os
+import shutil
 import sys
+import tempfile
 import warnings
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from ruamel.yaml.comments import CommentedMap
 
@@ -30,6 +33,7 @@ from .git_utils import (
 	_git_ls_yaml_files,
 	_git_checkout,
 	_git_push_set_upstream,
+	_is_git_repo,
 	_remote_url,
 	_run_git,
 	_set_git_verbose,
@@ -804,6 +808,54 @@ def _format_cli_summary(
 	return "\n".join(lines)
 
 
+@contextlib.contextmanager
+def _base_worktree(repo_root: Path, *, base_branch: str, remote: str) -> Iterable[Path]:
+	if not _is_git_repo(repo_root):
+		yield repo_root
+		return
+	worktree_dir = Path(tempfile.mkdtemp(prefix="auto-krr-base-"))
+	try:
+		_run_git(repo_root, ["fetch", remote, base_branch])
+		_run_git(repo_root, ["worktree", "add", "--detach", str(worktree_dir), f"{remote}/{base_branch}"])
+		yield worktree_dir
+	finally:
+		_run_git(repo_root, ["worktree", "remove", "--force", str(worktree_dir)], check=False)
+		shutil.rmtree(worktree_dir, ignore_errors=True)
+
+
+def _copy_changed_paths(*, src_root: Path, dest_root: Path, changed_paths: set[Path]) -> List[Path]:
+	actually_changed: List[Path] = []
+	for src_path in changed_paths:
+		rel = src_path.relative_to(src_root)
+		dest_path = dest_root / rel
+		new_txt = src_path.read_text(encoding="utf-8")
+		old_txt = dest_path.read_text(encoding="utf-8")
+		if new_txt != old_txt:
+			dest_path.write_text(new_txt, encoding="utf-8")
+			actually_changed.append(dest_path)
+	return actually_changed
+
+
+def _stage_and_commit(
+	repo_root: Path,
+	paths: List[Path],
+	*,
+	stage: bool,
+	commit: bool,
+	commit_message: str,
+	forgejo_url: str,
+) -> None:
+	if stage and paths:
+		rel_paths = [str(p.relative_to(repo_root)) for p in paths]
+		_run_git(repo_root, ["add", "--", *rel_paths])
+		print("STAGED: git add on changed files.")
+
+	if commit and paths:
+		_ensure_git_identity(repo_root, forgejo_url=forgejo_url)
+		_run_git(repo_root, ["commit", "-m", commit_message])
+		print("COMMITTED.")
+
+
 def _write_changes(
 	repo_root: Path,
 	changed_files: Dict[Path, YamlDocBundle],
@@ -949,16 +1001,7 @@ def _maybe_create_pr(
 			expected_authors=expected_authors,
 		)
 		if existing:
-			_run_git(repo_root, ["checkout", head_branch])
-			_run_git(repo_root, ["fetch", args.remote, base_branch])
-			try:
-				_run_git(repo_root, ["rebase", f"{args.remote}/{base_branch}"])
-			except Exception:
-				_run_git(repo_root, ["rebase", "--abort"], check=False)
-				_run_git(repo_root, ["reset", "--hard", f"{args.remote}/{base_branch}"])
-				print("REBASE CONFLICT: discarded local changes, will re-apply.")
-				return 3
-			_git_push_set_upstream(repo_root, args.remote, head_branch, force_with_lease=True)
+			_git_push_set_upstream(repo_root, args.remote, head_branch, force_with_lease=False)
 			print(f"PUSHED: {args.remote}/{head_branch}")
 			body = _format_pr_body(summary, unmatched)
 			pr_data = _forgejo_find_open_pr_data(
@@ -983,7 +1026,7 @@ def _maybe_create_pr(
 			print(f"PR EXISTS: {existing}")
 			return 0
 
-		_git_push_set_upstream(repo_root, args.remote, head_branch, force_with_lease=True)
+		_git_push_set_upstream(repo_root, args.remote, head_branch, force_with_lease=False)
 		print(f"PUSHED: {args.remote}/{head_branch}")
 
 		body = _format_pr_body(summary, unmatched)
@@ -1036,6 +1079,103 @@ def main() -> int:
 		yaml_issues: Dict[str, List[str]] = {"warnings": [], "errors": []}
 		cli_format = getattr(args, "cli_format", "compact")
 
+		if args.pr:
+			with _base_worktree(repo_root, base_branch=base_branch, remote=args.remote) as base_root:
+				base_yaml_files = _git_ls_yaml_files(base_root)
+				if not base_yaml_files:
+					print("No tracked YAML files found in base worktree.", file=sys.stderr)
+					return 2
+
+				hr_index, hr_index_by_name, comment_index = _build_hr_index(
+					base_root,
+					base_yaml_files,
+					yaml_issues=yaml_issues,
+				)
+
+				changed_files, changed_paths, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
+					base_root,
+					rec_map,
+					hints_map,
+					hr_index,
+					hr_index_by_name,
+					comment_index,
+					only_missing=args.only_missing,
+					no_name_fallback=args.no_name_fallback,
+					cli_format=cli_format,
+					yaml_issues=yaml_issues,
+				)
+				summary["yaml_warnings"] = yaml_issues.get("warnings", [])
+				summary["yaml_errors"] = yaml_issues.get("errors", [])
+				unmatched_out = unmatched
+
+				if unmatched_out:
+					print("\nUnmatched KRR targets:", file=sys.stderr)
+					for t in unmatched_out[:200]:
+						print(f"	- {t}", file=sys.stderr)
+
+				if total_changed_targets == 0:
+					print("\n" + _format_cli_summary(summary, unmatched, cli_format=cli_format))
+					print("\nNo changes needed.")
+					return 0
+
+				if not args.write:
+					print("\n" + _format_cli_summary(summary, unmatched, cli_format=cli_format))
+					print(
+						f"\nDRY-RUN: would update {len(changed_files)} file(s), {total_changed_targets} target(s). "
+						f"Use --write or set {_env_key('WRITE')}=1."
+					)
+					return 0
+
+				_write_changes(
+					base_root,
+					changed_files,
+					only_paths=changed_paths,
+					stage=False,
+					commit=False,
+					commit_message=args.commit_message,
+					forgejo_url=args.forgejo_url,
+					yaml_issues=yaml_issues,
+				)
+				summary["yaml_warnings"] = yaml_issues.get("warnings", [])
+				summary["yaml_errors"] = yaml_issues.get("errors", [])
+
+				if _is_git_repo(repo_root):
+					_run_git(repo_root, ["checkout", head_branch])
+					_run_git(repo_root, ["fetch", args.remote, base_branch])
+					_run_git(repo_root, ["merge", "--no-edit", f"{args.remote}/{base_branch}"])
+
+				actually_changed = _copy_changed_paths(
+					src_root=base_root,
+					dest_root=repo_root,
+					changed_paths=changed_paths,
+				)
+				print(f"\nWROTE: updated {len(actually_changed)} file(s).")
+
+				_stage_and_commit(
+					repo_root,
+					actually_changed,
+					stage=args.stage,
+					commit=args.commit,
+					commit_message=args.commit_message,
+					forgejo_url=args.forgejo_url,
+				)
+
+				print("\n" + _format_cli_summary(summary, unmatched, cli_format=cli_format))
+				if not changed_paths and args.pr:
+					print("No changes needed; skipping PR.")
+					return 0
+
+				pr_status = _maybe_create_pr(
+					args,
+					repo_root,
+					base_branch=base_branch,
+					head_branch=head_branch,
+					had_changes=bool(changed_paths),
+					summary=summary,
+					unmatched=unmatched,
+				)
+				return pr_status
+
 		hr_index, hr_index_by_name, comment_index = _build_hr_index(
 			repo_root,
 			yaml_files,
@@ -1070,7 +1210,10 @@ def main() -> int:
 
 		if not args.write:
 			print("\n" + _format_cli_summary(summary, unmatched, cli_format=cli_format))
-			print(f"\nDRY-RUN: would update {len(changed_files)} file(s), {total_changed_targets} target(s). Use --write or set {_env_key('WRITE')}=1.")
+			print(
+				f"\nDRY-RUN: would update {len(changed_files)} file(s), {total_changed_targets} target(s). "
+				f"Use --write or set {_env_key('WRITE')}=1."
+			)
 			return 0
 
 		actually_changed = _write_changes(
