@@ -407,8 +407,9 @@ def _apply_krr_to_repo(
 	no_name_fallback: bool,
 	cli_format: str = "compact",
 	yaml_issues: Dict[str, List[str]],
-) -> Tuple[Dict[Path, YamlDocBundle], int, List[str], Dict[str, List[str]]]:
+) -> Tuple[Dict[Path, YamlDocBundle], set[Path], int, List[str], Dict[str, List[str]]]:
 	changed_files: Dict[Path, YamlDocBundle] = {}
+	changed_paths: set[Path] = set()
 	total_changed_targets = 0
 	unmatched: List[str] = []
 	updated_cli: List[str] = []
@@ -447,6 +448,7 @@ def _apply_krr_to_repo(
 		repo_root=repo_root,
 		matched_targets=matched_targets,
 		seen_resources=seen_resources,
+		changed_paths=changed_paths,
 		updated_cli=updated_cli,
 		updated_markdown=updated_markdown,
 		skipped_cli=skipped_cli,
@@ -462,6 +464,7 @@ def _apply_krr_to_repo(
 		repo_root=repo_root,
 		matched_targets=matched_targets,
 		seen_resources=seen_resources,
+		changed_paths=changed_paths,
 		updated_cli=updated_cli,
 		updated_markdown=updated_markdown,
 		skipped_cli=skipped_cli,
@@ -511,6 +514,7 @@ def _apply_krr_to_repo(
 
 	return (
 		changed_files,
+		changed_paths,
 		total_changed_targets,
 		unmatched,
 		{
@@ -534,6 +538,7 @@ def _apply_with_matcher(
 	repo_root: Path,
 	matched_targets: Optional[set[TargetKey]],
 	seen_resources: set[tuple[str, int, int]],
+	changed_paths: set[Path],
 	updated_cli: List[str],
 	updated_markdown: List[str],
 	skipped_cli: List[str],
@@ -574,6 +579,7 @@ def _apply_with_matcher(
 			only_missing=only_missing,
 			repo_root=repo_root,
 			seen_resources=seen_resources,
+			changed_paths=changed_paths,
 		)
 
 		if matcher.summarize_per_match:
@@ -629,6 +635,7 @@ def _apply_to_target_matches(
 	only_missing: bool,
 	repo_root: Path,
 	seen_resources: set[tuple[str, int, int]],
+	changed_paths: set[Path],
 ) -> List[_MatchOutcome]:
 	outcomes: List[_MatchOutcome] = []
 
@@ -672,6 +679,8 @@ def _apply_to_target_matches(
 			rec=target_match.rec,
 			only_missing=only_missing,
 		)
+		if changed:
+			changed_paths.add(loc.path)
 
 		if res_notes:
 			print(f"- {label} @ {loc.path.relative_to(repo_root)}")
@@ -799,6 +808,7 @@ def _write_changes(
 	repo_root: Path,
 	changed_files: Dict[Path, YamlDocBundle],
 	*,
+	only_paths: Optional[set[Path]] = None,
 	stage: bool,
 	commit: bool,
 	commit_message: str,
@@ -807,6 +817,8 @@ def _write_changes(
 ) -> List[Path]:
 	actually_changed: List[Path] = []
 	for fp, (raw, docs, yaml) in changed_files.items():
+		if only_paths is not None and fp not in only_paths:
+			continue
 		try:
 			with warnings.catch_warnings(record=True) as caught:
 				warnings.simplefilter("always")
@@ -1030,7 +1042,7 @@ def main() -> int:
 			yaml_issues=yaml_issues,
 		)
 
-		changed_files, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
+		changed_files, changed_paths, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
 			repo_root,
 			rec_map,
 			hints_map,
@@ -1064,6 +1076,7 @@ def main() -> int:
 		actually_changed = _write_changes(
 			repo_root,
 			changed_files,
+			only_paths=changed_paths,
 			stage=args.stage,
 			commit=args.commit,
 			commit_message=args.commit_message,

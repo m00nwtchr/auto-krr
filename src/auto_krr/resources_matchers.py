@@ -127,11 +127,10 @@ class HelmReleaseMatcher:
 			raise ValueError("helmrelease matcher requires TargetKey with resource set")
 		if target.resource.kind != "HelmRelease":
 			raise ValueError("helmrelease matcher requires HelmRelease targets")
-		kind, namespace, name = _resource_identity(doc)
 		return _format_match_label(
-			kind=kind or target.resource.kind,
-			namespace=namespace or target.resource.namespace,
-			name=name or target.resource.name,
+			kind=target.resource.kind,
+			namespace=target.resource.namespace,
+			name=target.resource.name,
 			controller=target.controller,
 			container=target.container,
 			matcher=self.name,
@@ -232,7 +231,11 @@ class CommentResourcesMatcher:
 
 	def describe_match(self, target_key: object, doc: CommentedMap) -> str:
 		target = target_key
-		kind, namespace, name = _resource_identity(doc)
+		kind = namespace = name = None
+		if isinstance(target, TargetKey) and target.resource is not None:
+			kind = target.resource.kind
+			namespace = target.resource.namespace
+			name = target.resource.name
 		return _format_match_label(
 			kind=kind or "resource",
 			namespace=namespace or "default",

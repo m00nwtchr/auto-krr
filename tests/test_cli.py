@@ -70,7 +70,7 @@ spec:
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
 	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
-	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
+	changed_files, changed_paths, total_changed, unmatched, summary = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
 		hints_map={},
@@ -84,6 +84,7 @@ spec:
 	)
 
 	assert path in changed_files
+	assert path in changed_paths
 	assert total_changed == 1
 	assert unmatched == []
 	assert any("demo" in item for item in summary["updated"])
@@ -117,7 +118,7 @@ spec:
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
 	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
-	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
+	changed_files, changed_paths, total_changed, unmatched, summary = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
 		hints_map={},
@@ -131,6 +132,7 @@ spec:
 	)
 
 	assert path in changed_files
+	assert path in changed_paths
 	assert total_changed == 1
 	assert unmatched == []
 	assert any("demo" in item for item in summary["updated"])
@@ -164,7 +166,7 @@ spec:
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
 	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
-	changed_files, total_changed, unmatched, summary = _apply_krr_to_repo(
+	changed_files, changed_paths, total_changed, unmatched, summary = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
 		hints_map={},
@@ -178,6 +180,7 @@ spec:
 	)
 
 	assert path in changed_files
+	assert path in changed_paths
 	assert total_changed == 1
 	assert unmatched == []
 	assert any("resources block already matched" in item for item in summary["skipped"])
@@ -213,7 +216,7 @@ spec:
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="main", container="app")
 	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
-	_, _, unmatched, _ = _apply_krr_to_repo(
+	_, _, _, unmatched, _ = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
 		hints_map={},
@@ -256,7 +259,7 @@ spec:
 	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="trivy-operator"), controller="trivy-operator", container="trivy-operator")
 	rec_map = {target: RecommendedResources(req_cpu_cores=0.5)}
 
-	_, _, unmatched, _ = _apply_krr_to_repo(
+	_, _, _, unmatched, _ = _apply_krr_to_repo(
 		tmp_path,
 		rec_map,
 		hints_map={},
