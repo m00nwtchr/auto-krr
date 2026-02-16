@@ -77,6 +77,8 @@ def _aggregate_krr(
 	out: Dict[TargetKey, RecommendedResources] = {}
 	hints: Dict[TargetKey, KrrTargetHint] = {}
 	key_sources: Dict[TargetKey, set[str]] = {}
+	collision_groups: Dict[Tuple[str, str, str], set[str]] = {}
+	collision_fallback: Dict[Tuple[str, str, str], str] = {}
 
 	severity_rank = {
 		"UNKNOWN": -1,
@@ -101,6 +103,48 @@ def _aggregate_krr(
 
 		hr_name = labels.get("helm.toolkit.fluxcd.io/name")
 		hr_ns = labels.get("helm.toolkit.fluxcd.io/namespace")
+		if not (hr_name and hr_ns):
+			continue
+
+		controller_label = labels.get("app.kubernetes.io/controller") or ""
+		if not controller_label:
+			continue
+
+		container = scan.get("container") or obj.get("container") or ""
+		container = str(container)
+		if not container:
+			continue
+
+		label_name = labels.get("app.kubernetes.io/name") or ""
+		label_instance = labels.get("app.kubernetes.io/instance") or ""
+		label_id = str(label_name or label_instance or "")
+		if not label_id:
+			continue
+
+		group_key = (str(hr_ns), str(hr_name), str(container))
+		collision_groups.setdefault(group_key, set()).add(label_id)
+
+	for group_key, ids in collision_groups.items():
+		if len(ids) > 1:
+			collision_fallback[group_key] = "label_id"
+
+	for scan in scans:
+		if not isinstance(scan, dict):
+			continue
+		sev = str(scan.get("severity") or "UNKNOWN").upper()
+		if severity_rank.get(sev, -1) < min_rank:
+			continue
+
+		obj = scan.get("object") or {}
+		labels = obj.get("labels") or {}
+		if not isinstance(labels, dict):
+			labels = {}
+
+		hr_name = labels.get("helm.toolkit.fluxcd.io/name")
+		hr_ns = labels.get("helm.toolkit.fluxcd.io/namespace")
+
+		container = scan.get("container") or obj.get("container") or ""
+		container = str(container)
 
 		controller_label = labels.get("app.kubernetes.io/controller") or ""
 		obj_name = obj.get("name") or ""
@@ -108,11 +152,19 @@ def _aggregate_krr(
 		label_instance = labels.get("app.kubernetes.io/instance") or ""
 		label_id = label_name or label_instance or ""
 
-		candidates: List[str] = []
-		for candidate in (controller_label, obj_name, label_name, label_instance):
-			if candidate:
-				candidates.append(str(candidate))
-		controller = candidates[0] if candidates else ""
+		group_key = None
+		if hr_name and hr_ns and container:
+			group_key = (str(hr_ns), str(hr_name), str(container))
+
+		if group_key and collision_fallback.get(group_key) == "label_id" and label_id:
+			controller = str(label_id)
+			candidates = [controller, str(obj_name) if obj_name else ""]
+		else:
+			candidates: List[str] = []
+			for candidate in (controller_label, obj_name, label_name, label_instance):
+				if candidate:
+					candidates.append(str(candidate))
+			controller = candidates[0] if candidates else ""
 
 		container = scan.get("container") or obj.get("container") or ""
 		container = str(container)
@@ -136,7 +188,11 @@ def _aggregate_krr(
 		if controller_label and label_id and target_key in out:
 			existing_ids = key_sources.get(target_key, set())
 			if label_id not in existing_ids:
-				for alt in candidates[1:]:
+				alt_candidates: List[str] = []
+				for alt in (label_name, label_instance, obj_name):
+					if alt:
+						alt_candidates.append(str(alt))
+				for alt in alt_candidates:
 					alt_key = TargetKey(resource=res_ref, controller=alt, container=container)
 					alt_ids = key_sources.get(alt_key, set())
 					if (alt_key not in out) or (label_id in alt_ids):
