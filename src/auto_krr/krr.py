@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .types import KrrTargetHint, RecommendedResources, ResourceRef, TargetKey
 
@@ -76,6 +76,7 @@ def _aggregate_krr(
 	scans = data.get("scans") or []
 	out: Dict[TargetKey, RecommendedResources] = {}
 	hints: Dict[TargetKey, KrrTargetHint] = {}
+	key_sources: Dict[TargetKey, set[str]] = {}
 
 	severity_rank = {
 		"UNKNOWN": -1,
@@ -101,14 +102,17 @@ def _aggregate_krr(
 		hr_name = labels.get("helm.toolkit.fluxcd.io/name")
 		hr_ns = labels.get("helm.toolkit.fluxcd.io/namespace")
 
-		controller = (
-			labels.get("app.kubernetes.io/controller")
-			or obj.get("name")
-			or labels.get("app.kubernetes.io/name")
-			or labels.get("app.kubernetes.io/instance")
-			or ""
-		)
-		controller = str(controller)
+		controller_label = labels.get("app.kubernetes.io/controller") or ""
+		obj_name = obj.get("name") or ""
+		label_name = labels.get("app.kubernetes.io/name") or ""
+		label_instance = labels.get("app.kubernetes.io/instance") or ""
+		label_id = label_name or label_instance or ""
+
+		candidates: List[str] = []
+		for candidate in (controller_label, obj_name, label_name, label_instance):
+			if candidate:
+				candidates.append(str(candidate))
+		controller = candidates[0] if candidates else ""
 
 		container = scan.get("container") or obj.get("container") or ""
 		container = str(container)
@@ -129,6 +133,16 @@ def _aggregate_krr(
 			ResourceRef(kind="HelmRelease", namespace=str(hr_ns), name=str(hr_name)) if hr_name and hr_ns else None
 		)
 		target_key = TargetKey(resource=res_ref, controller=controller, container=container)
+		if controller_label and label_id and target_key in out:
+			existing_ids = key_sources.get(target_key, set())
+			if label_id not in existing_ids:
+				for alt in candidates[1:]:
+					alt_key = TargetKey(resource=res_ref, controller=alt, container=container)
+					alt_ids = key_sources.get(alt_key, set())
+					if (alt_key not in out) or (label_id in alt_ids):
+						target_key = alt_key
+						controller = alt
+						break
 		prev = out.get(target_key)
 		if prev is None:
 			out[target_key] = rec
@@ -141,6 +155,8 @@ def _aggregate_krr(
 			prev.cur_req_mem_bytes = _merge_max(prev.cur_req_mem_bytes, rec.cur_req_mem_bytes)
 			prev.cur_lim_cpu_cores = _merge_max(prev.cur_lim_cpu_cores, rec.cur_lim_cpu_cores)
 			prev.cur_lim_mem_bytes = _merge_max(prev.cur_lim_mem_bytes, rec.cur_lim_mem_bytes)
+		if label_id:
+			key_sources.setdefault(target_key, set()).add(label_id)
 
 		kind = str(obj.get("kind") or "") or None
 		namespace = str(obj.get("namespace") or "") or None
