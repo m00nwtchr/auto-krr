@@ -233,7 +233,10 @@ def _apply_to_resources_map(
 		sec = resources.get(section)
 		if not isinstance(sec, CommentedMap):
 			sec = CommentedMap()
-			_insert_if_missing(resources, section, sec, after_keys=["requests" if section == "limits" else ""])
+			if section in resources:
+				resources[section] = sec
+			else:
+				_insert_if_missing(resources, section, sec, after_keys=["requests" if section == "limits" else ""])
 			changed = True
 
 		old = sec.get(field)
