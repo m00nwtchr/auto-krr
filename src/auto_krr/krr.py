@@ -101,10 +101,11 @@ def _aggregate_krr(
 		hr_name = labels.get("helm.toolkit.fluxcd.io/name")
 		hr_ns = labels.get("helm.toolkit.fluxcd.io/namespace")
 
-		controller = obj.get("name") or (
+		controller = (
 			labels.get("app.kubernetes.io/controller")
 			or labels.get("app.kubernetes.io/name")
 			or labels.get("app.kubernetes.io/instance")
+			or obj.get("name")
 			or ""
 		)
 		controller = str(controller)
