@@ -1141,8 +1141,13 @@ def main() -> int:
 
 				if _is_git_repo(repo_root):
 					_run_git(repo_root, ["checkout", head_branch])
-					_run_git(repo_root, ["fetch", args.remote, base_branch])
-					_run_git(repo_root, ["merge", "--no-edit", f"{args.remote}/{base_branch}"])
+					try:
+						_run_git(repo_root, ["fetch", args.remote, base_branch])
+						_run_git(repo_root, ["merge", "--no-edit", "FETCH_HEAD"])
+					except Exception:
+						_run_git(repo_root, ["merge", "--abort"], check=False)
+						print("MERGE CONFLICT: failed to update branch with base; retrying.")
+						return 3
 
 				actually_changed = _copy_changed_paths(
 					src_root=base_root,
