@@ -265,7 +265,7 @@ def _prepare_repo(args: argparse.Namespace) -> Tuple[Path, str, str]:
 			head_branch = existing
 		else:
 			ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-			head_branch = f"krr-resources-{ts}"
+			head_branch = f"krr/resources-{ts}"
 
 	if args.pr:
 		_run_git(repo_root, ["fetch", args.remote, head_branch], check=False)
