@@ -28,6 +28,7 @@ from .git_utils import (
 	_git_current_branch,
 	_git_is_dirty,
 	_git_ls_yaml_files,
+	_git_checkout,
 	_git_push_set_upstream,
 	_remote_url,
 	_run_git,
@@ -255,13 +256,93 @@ def _prepare_repo(args: argparse.Namespace) -> Tuple[Path, str, str]:
 	base_branch = args.pr_base.strip() or _git_current_branch(repo_root)
 	head_branch = args.pr_branch.strip()
 	if args.pr and not head_branch:
-		ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-		head_branch = f"krr-resources-{ts}"
+		existing = _select_existing_pr_branch(args, repo_root, base_branch)
+		if existing:
+			head_branch = existing
+		else:
+			ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+			head_branch = f"krr-resources-{ts}"
 
 	if args.pr:
-		_git_checkout_new(repo_root, head_branch, base_branch)
+		_run_git(repo_root, ["fetch", args.remote, head_branch], check=False)
+		if _git_ref_exists(repo_root, f"refs/heads/{head_branch}"):
+			_git_checkout(repo_root, head_branch)
+		elif _git_ref_exists(repo_root, f"refs/remotes/{args.remote}/{head_branch}"):
+			_run_git(repo_root, ["checkout", "-B", head_branch, f"{args.remote}/{head_branch}"])
+		else:
+			_git_checkout_new(repo_root, head_branch, base_branch)
 
 	return repo_root, base_branch, head_branch
+
+
+def _git_ref_exists(repo_root: Path, ref: str) -> bool:
+	p = _run_git(repo_root, ["show-ref", "--verify", "--quiet", ref], check=False)
+	return p.returncode == 0
+
+
+def _select_existing_pr_branch(
+	args: argparse.Namespace,
+	repo_root: Path,
+	base_branch: str,
+) -> Optional[str]:
+	token = (args.forgejo_token or "").strip()
+	if not token:
+		return None
+
+	base_url = (args.forgejo_url or "").strip()
+	owner = (args.forgejo_owner or "").strip()
+	repo_name = (args.forgejo_repo or "").strip()
+
+	if not (base_url and owner and repo_name):
+		remote_url = _remote_url(repo_root, args.remote)
+		if remote_url:
+			d_base, d_owner, d_repo = _detect_forgejo_from_remote(remote_url)
+			base_url = base_url or (d_base or "")
+			owner = owner or (d_owner or "")
+			repo_name = repo_name or (d_repo or "")
+
+	if not (base_url and owner and repo_name):
+		return None
+
+	repo = ForgejoRepo(
+		base_url=base_url,
+		owner=owner,
+		repo=repo_name,
+		api_prefix=args.forgejo_api_prefix,
+	)
+
+	try:
+		forgejo_user = _forgejo_get_user(
+			repo,
+			token=token,
+			auth_scheme=args.forgejo_auth_scheme,
+			insecure_tls=args.insecure_tls,
+		)
+		expected_authors = _expected_pr_authors(forgejo_user=forgejo_user)
+		if not expected_authors:
+			return None
+		open_prs = _forgejo_list_open_prs(
+			repo,
+			token=token,
+			auth_scheme=args.forgejo_auth_scheme,
+			base_branch=base_branch,
+			insecure_tls=args.insecure_tls,
+			expected_authors=expected_authors,
+		)
+		if not open_prs:
+			return None
+
+		def _pr_sort_key(pr: Dict[str, object]) -> str:
+			return str(pr.get("updated_at") or pr.get("created_at") or pr.get("number") or "")
+
+		open_prs.sort(key=_pr_sort_key, reverse=True)
+		chosen = open_prs[0]
+		head = chosen.get("head") or {}
+		if isinstance(head, dict):
+			return str(head.get("ref") or head.get("name") or "")
+	except Exception:
+		return None
+	return None
 
 
 def _build_hr_index(
