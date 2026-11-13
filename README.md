@@ -8,7 +8,10 @@ This is a CLI-first project and is **dry-run by default**.
 - Reads `krr.json` and aggregates per-container recommendations.
 - Filters by severity (OK/GOOD/WARNING/CRITICAL).
 - Matches Flux HelmReleases by probing chart values and rendering them with flate.
+- Runs one repository-wide flate discovery pass in an isolated Git-backed probe copy.
 - Updates the discovered Helm values path with CPU/memory requests/limits.
+- Reports unambiguous, suggested, and failed discovery separately in CLI output and Forgejo PR bodies.
+- Inspects CRD `resources` schema fields from Kubernetes first, then HTTPS yaml-language-server schemas.
 - Git-aware: only touches tracked YAML files; can stage/commit/push and open a PR.
 
 ## KRR vs repo objects (summary)
@@ -19,6 +22,7 @@ KRR reports live in-cluster workloads (Deployments, StatefulSets, etc.), but thi
 - `ruamel-yaml`
 - `flate` executable (default name: `flate`)
 - `helm` executable (default name: `helm`)
+- Optional `kubectl` executable for CRD schema discovery (default name: `kubectl`)
 
 ## Install
 
@@ -72,7 +76,13 @@ auto-krr \
 - The HelmRelease must be `kind: HelmRelease` with `apiVersion: helm.toolkit.fluxcd.io/...`.
 - The chart reference must resolve to a chart source available to Helm. OCIRepository, HelmRepository, and inline chart references are supported.
 - auto-krr enumerates chart defaults/schema and release values, injects unique resource sentinels, and asks flate to render the selected HelmRelease.
-- A rendered workload/container is patched only when exactly one Helm value path is identified. Missing, failed, or ambiguous discovery is reported as a skip; chart-shape heuristics are not used.
+- auto-krr injects deterministic, hash-derived sentinels at the original HelmRelease paths in a temporary independent repository copy, then runs `flate build` once against the repository manifest root. Kustomizations, substitutions, source objects, and dependency selection are preserved; the user checkout never receives sentinel values.
+- A rendered workload/container is patched only when exactly one Helm value path is identified. Missing, failed, or ambiguous discovery is never guessed. Ambiguities list every candidate path and suggest adding a location-based comment immediately above the selected `resources` map:
+  ```text
+  # krr: controller=<controller> container=<container>
+  ```
+- CLI and PR output contain `Unambiguous matches`, `Suggested matches`, and `Failed matches` sections. Suggestions and failures are informational and never count as changed targets.
+- CRD schemas can identify `resources` fields but cannot establish a workload/container relationship, so CRD findings are suggestions only. The detector uses `kubectl get crd -o json` first and falls back to HTTPS `yaml-language-server: $schema=...` comments when API data is unavailable or incomplete.
 - KRR scan entries must include Flux labels:
   - `helm.toolkit.fluxcd.io/name`
   - `helm.toolkit.fluxcd.io/namespace`
@@ -86,7 +96,9 @@ spec.values.controllers.<controller>.containers.<container>.resources
 ```
 It converts CPU to millicores (`m`) and memory to Mi/Gi (rounded up). When multiple KRR entries match the same target, it keeps the **maximum** recommendation per field.
 
-Discovery uses temporary repository copies and caches chart metadata and the flate probe for the duration of one run. The original checkout is never rendered with sentinel values.
+Discovery uses temporary repository copies with independent Git metadata and caches chart metadata and the flate probe for the duration of one run. The original checkout is never rendered with sentinel values.
+
+Use `--check-comments` (or `CHECK_COMMENTS=1`) to validate existing KRR comments against fresh discovery without rewriting them. It reports unnecessary comments, comments that disagree with a sole discovered path, and comments that could not be validated because discovery was ambiguous, unmapped, or failed. Explicit comments remain authoritative during normal application whether or not validation is enabled.
 
 ## CLI options (high level)
 - `--krr-json`: path to KRR report (required)
@@ -94,6 +106,9 @@ Discovery uses temporary repository copies and caches chart metadata and the fla
 - `--repo-url`: git URL or `owner/repo` shorthand (auto-clone)
 - `--flate-bin`: flate executable (default: `flate`)
 - `--helm-bin`: Helm executable used to inspect chart values (default: `helm`)
+- `--kubectl-bin`: kubectl executable used for CRD schema discovery (default: `kubectl`)
+- `--debug-discovery`: include bounded CRD discovery diagnostics in the report
+- `--check-comments`: validate existing KRR comments without editing them
 - `--git-base-url`: base URL for shorthand (defaults to `FORGEJO_URL` or GitHub)
 - `--min-severity`: `OK|GOOD|WARNING|CRITICAL` (default: `WARNING`)
 - `--only-missing`: only set fields that are currently missing
@@ -123,6 +138,9 @@ Common ones:
 - `REPO_URL`
 - `FLATE_BIN`
 - `HELM_BIN`
+- `KUBECTL_BIN`
+- `DEBUG_DISCOVERY`
+- `CHECK_COMMENTS`
 - `GIT_BASE_URL`
 - `CLONE_DEPTH`
 - `MIN_SEVERITY`
