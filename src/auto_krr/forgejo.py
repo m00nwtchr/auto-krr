@@ -132,7 +132,7 @@ def _forgejo_find_open_pr_data(
 		{
 			"state": "open",
 			"base": base_branch,
-			"head": f"{repo.owner}:{head_branch}",
+			"head": head_branch,
 		}
 	)
 	api = repo.base_url.rstrip("/") + api_prefix + f"/repos/{repo.owner}/{repo.repo}/pulls?{query}"
