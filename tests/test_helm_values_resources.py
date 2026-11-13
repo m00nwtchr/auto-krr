@@ -1,42 +1,96 @@
-from pathlib import Path
-
 from ruamel.yaml.comments import CommentedMap
 
-from auto_krr.patching import _apply_to_hr_doc
-from auto_krr.types import RecommendedResources, ResourceRef, TargetKey
-from auto_krr.yaml_utils import _read_all_yaml_docs
+from auto_krr.patching import _apply_to_hr_doc, _resolve_resources_path
+from auto_krr.types import RecommendedResources
 
 
-def _load_doc(name: str) -> CommentedMap:
-	path = Path(__file__).parent / "fixtures" / "manifests" / name
-	_, docs, _ = _read_all_yaml_docs(path)
-	assert len(docs) == 1
-	doc = docs[0]
-	assert isinstance(doc, CommentedMap)
-	return doc
+def _doc(values: CommentedMap) -> CommentedMap:
+	return CommentedMap({"spec": CommentedMap({"values": values})})
 
 
-def test_apply_to_hr_doc_skips_when_containers_missing() -> None:
-	# Intended behavior: never create containers, only skip when missing.
-	doc = _load_doc("helmrelease_app_template_missing_containers.yaml")
-	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="krr"), controller="krr", container="app")
-	rec = RecommendedResources(req_cpu_cores=0.5)
+def test_resolve_nested_discovered_path_without_chart_shape() -> None:
+	values = CommentedMap(
+		{
+			"worker": CommentedMap(
+				{
+					"containers": CommentedMap(
+						{"app": CommentedMap({"image": "example/app:1"})}
+					)
+				}
+			)
+		}
+	)
+	doc = _doc(values)
 
-	changed, notes = _apply_to_hr_doc(doc, target=target, rec=rec, only_missing=False)
-	assert changed is False
-	assert any("SKIP: containers is not a mapping" in note for note in notes)
+	resources, changed, notes = _resolve_resources_path(
+		doc,
+		["spec", "values", "worker", "containers", "app", "resources"],
+		create_missing=True,
+	)
 
-
-def test_resources_inserted_alphabetically() -> None:
-	# Intended behavior: create resources and insert the key alphabetically.
-	doc = _load_doc("helmrelease_app_template_resources_missing.yaml")
-	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="chronyd"), controller="main", container="app")
-	rec = RecommendedResources(req_cpu_cores=0.5)
-
-	changed, notes = _apply_to_hr_doc(doc, target=target, rec=rec, only_missing=False)
+	assert isinstance(resources, CommentedMap)
 	assert changed is True
-	assert any("requests.cpu" in note for note in notes)
+	assert notes == []
+	assert doc["spec"]["values"]["worker"]["containers"]["app"]["resources"] == {}
 
-	container = doc["spec"]["values"]["controllers"]["main"]["containers"]["app"]
-	keys = list(container.keys())
-	assert keys == ["env", "image", "resources", "securityContext"]
+
+def test_resolve_creates_missing_intermediate_maps() -> None:
+	doc = CommentedMap()
+
+	resources, changed, notes = _resolve_resources_path(
+		doc,
+		["spec", "values", "controller", "containers", "app", "resources"],
+		create_missing=True,
+	)
+
+	assert isinstance(resources, CommentedMap)
+	assert changed is True
+	assert notes == []
+	assert doc["spec"]["values"]["controller"]["containers"]["app"]["resources"] == {}
+
+
+def test_resolve_skips_non_mapping_component() -> None:
+	doc = _doc(CommentedMap({"worker": "not-a-map"}))
+
+	resources, changed, notes = _resolve_resources_path(
+		doc,
+		["spec", "values", "worker", "resources"],
+		create_missing=True,
+	)
+
+	assert resources is None
+	assert changed is False
+	assert any("not a mapping" in note for note in notes)
+
+
+def test_apply_to_hr_doc_preserves_only_missing_and_converts_quantities() -> None:
+	resources = CommentedMap(
+		{
+			"requests": CommentedMap({"cpu": "10m"}),
+			"limits": CommentedMap({}),
+		}
+	)
+	doc = _doc(
+		CommentedMap(
+			{
+				"worker": CommentedMap(
+					{
+						"resources": resources,
+					}
+				)
+			}
+		)
+	)
+
+	changed, notes = _apply_to_hr_doc(
+		doc,
+		resources_path=["spec", "values", "worker", "resources"],
+		rec=RecommendedResources(req_cpu_cores=0.5, req_mem_bytes=1024 * 1024, lim_mem_bytes=2 * 1024 * 1024),
+		only_missing=True,
+	)
+
+	assert changed is True
+	assert resources["requests"]["cpu"] == "10m"
+	assert resources["requests"]["memory"] == "1Mi"
+	assert resources["limits"]["memory"] == "2Mi"
+	assert any("already set" in note for note in notes)
