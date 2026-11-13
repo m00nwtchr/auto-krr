@@ -59,6 +59,20 @@ spec:
 	return path
 
 
+def _install_changed_apply(monkeypatch, manifest_path: Path) -> None:
+	monkeypatch.setattr(
+		cli,
+		"_apply_krr_to_repo",
+		lambda *_args, **_kwargs: (
+			{manifest_path: None},
+			{manifest_path},
+			1,
+			[],
+			{"updated": ["demo"], "skipped": [], "unmatched_markdown": []},
+		),
+	)
+
+
 def test_main_dry_run(monkeypatch, tmp_path: Path) -> None:
 	# Intended behavior: dry-run prints summary and exits 0 when changes exist.
 	manifest_path = _write_manifest(tmp_path)
@@ -144,6 +158,7 @@ def test_main_retries_on_rebase_conflict(monkeypatch, tmp_path: Path) -> None:
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
 	monkeypatch.setattr(cli, "_maybe_create_pr", _fake_maybe_create_pr)
+	_install_changed_apply(monkeypatch, manifest_path)
 
 	assert cli.main() == 0
 	assert call_state["calls"] == 2
@@ -168,6 +183,7 @@ def test_main_stops_after_second_rebase_conflict(monkeypatch, tmp_path: Path) ->
 	monkeypatch.setattr(cli, "_git_ls_yaml_files", lambda *_: [manifest_path])
 	monkeypatch.setattr(cli, "_write_changes", lambda *_args, **_kw: [manifest_path])
 	monkeypatch.setattr(cli, "_maybe_create_pr", lambda *_a, **_kw: 3)
+	_install_changed_apply(monkeypatch, manifest_path)
 
 	assert cli.main() == 0
 

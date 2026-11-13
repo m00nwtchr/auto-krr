@@ -6,8 +6,8 @@ from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 from ruamel.yaml.comments import CommentedMap
 
-from .hr import _chart_name_from_hr
-from .patching import HELM_VALUES_CONFIGS, _resolve_helm_values_resources
+from .flate_discovery import DiscoveryBatch, FlateDiscovery, _release_identity
+from .patching import _resolve_resources_path
 from .types import CommentTargetLoc, HrDocLoc, RecommendedResources, ResourceRef, TargetKey
 
 
@@ -61,25 +61,45 @@ class HelmReleaseMatcher:
 	def __init__(
 		self,
 		*,
+		repo_root: Path,
 		hr_index: Dict[ResourceRef, List[HrDocLoc]],
 		hr_index_by_name: Dict[str, List[HrDocLoc]],
 		no_name_fallback: bool,
+		discovery: Optional[FlateDiscovery] = None,
+		discovery_batch: Optional[DiscoveryBatch] = None,
+		flate_bin: str = "flate",
+		helm_bin: str = "helm",
 	) -> None:
+		self._repo_root = repo_root
 		self._hr_index = hr_index
 		self._hr_index_by_name = hr_index_by_name
 		self._no_name_fallback = no_name_fallback
-		self._configs = HELM_VALUES_CONFIGS
-		self._target_counts_by_resource: Dict[ResourceRef, int] = {}
+		self._discovery = discovery or FlateDiscovery(repo_root, flate_bin=flate_bin, helm_bin=helm_bin)
+		self._discovery_batch = discovery_batch if discovery_batch is not None else self._discover_batch()
+
+	def _discover_batch(self) -> DiscoveryBatch:
+		locs: Dict[Tuple[str, int], HrDocLoc] = {}
+		for candidates in self._hr_index.values():
+			for loc in candidates:
+				locs[(str(loc.path.resolve()), loc.doc_index)] = loc
+		for candidates in self._hr_index_by_name.values():
+			for loc in candidates:
+				locs[(str(loc.path.resolve()), loc.doc_index)] = loc
+
+		ordered_locs = list(locs.values())
+		if hasattr(self._discovery, "discover_many"):
+			return self._discovery.discover_many(ordered_locs)
+
+		results = {}
+		for loc in ordered_locs:
+			results[_release_identity(self._repo_root, loc)] = self._discovery.discover(loc)
+		return DiscoveryBatch(results=results, render_invocations=1 if ordered_locs else 0)
+
+	@property
+	def discovery_batch(self) -> DiscoveryBatch:
+		return self._discovery_batch
 
 	def iter_targets(self, rec_map: Dict[object, RecommendedResources]) -> Iterable[TargetMatch]:
-		self._target_counts_by_resource = {}
-		for target in rec_map.keys():
-			if not isinstance(target, TargetKey) or target.resource is None:
-				continue
-			if target.resource.kind != "HelmRelease":
-				continue
-			self._target_counts_by_resource[target.resource] = self._target_counts_by_resource.get(target.resource, 0) + 1
-
 		for target, rec in rec_map.items():
 			if not isinstance(target, TargetKey) or target.resource is None:
 				continue
@@ -147,30 +167,26 @@ class HelmReleaseMatcher:
 			raise ValueError("helmrelease matcher requires TargetKey with resource set")
 		if target.resource.kind != "HelmRelease":
 			raise ValueError("helmrelease matcher requires HelmRelease targets")
-		chart_name = _chart_name_from_hr(doc)
-		if chart_name:
-			config = self._configs.get(chart_name)
-			if config:
-				return _resolve_helm_values_resources(doc, target=target, create_missing=True, config=config)
-
-		# Heuristic matching for non-app-template HelmReleases.
-		count = self._target_counts_by_resource.get(target.resource, 0)
-		if count != 1:
-			return None, False, ["SKIP: heuristic requires a single workload for this HelmRelease"]
-
-		spec = doc.get("spec")
-		if not isinstance(spec, CommentedMap):
-			return None, False, ["SKIP: spec is not a mapping"]
-
-		values = spec.get("values")
-		if not isinstance(values, CommentedMap):
-			return None, False, ["SKIP: spec.values is not a mapping"]
-
-		resources = values.get("resources")
-		if not isinstance(resources, CommentedMap):
-			return None, False, ["SKIP: spec.values.resources is not a mapping"]
-
-		return resources, False, []
+		loc = HrDocLoc(path=match.path, doc_index=match.doc_index, doc=doc)
+		identity = _release_identity(self._repo_root, loc)
+		result = self._discovery_batch.results.get(identity)
+		if result is None:
+			notes = [f"SKIP: flate discovery has no result for {identity.namespace}/{identity.name}"]
+			return None, False, notes
+		path_for = getattr(result, "path_for")
+		try:
+			resources_path = path_for(identity, target.controller, target.container)
+		except TypeError:
+			resources_path = path_for(target.controller, target.container)
+		if resources_path is None:
+			notes = list(getattr(result, "notes", []))
+			if not notes:
+				notes.append(
+					f"SKIP: flate did not map workload/container {target.controller}/{target.container}"
+			)
+			return None, False, notes
+		resources, changed, path_notes = _resolve_resources_path(doc, resources_path, create_missing=True)
+		return resources, changed, list(getattr(result, "notes", [])) + path_notes
 
 
 class CommentResourcesMatcher:
