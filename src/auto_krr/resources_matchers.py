@@ -95,6 +95,10 @@ class HelmReleaseMatcher:
 			results[_release_identity(self._repo_root, loc)] = self._discovery.discover(loc)
 		return DiscoveryBatch(results=results, render_invocations=1 if ordered_locs else 0)
 
+	@property
+	def discovery_batch(self) -> DiscoveryBatch:
+		return self._discovery_batch
+
 	def iter_targets(self, rec_map: Dict[object, RecommendedResources]) -> Iterable[TargetMatch]:
 		for target, rec in rec_map.items():
 			if not isinstance(target, TargetKey) or target.resource is None:

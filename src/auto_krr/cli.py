@@ -9,7 +9,7 @@ import sys
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ruamel.yaml.comments import CommentedMap
 
@@ -39,6 +39,9 @@ from .git_utils import (
 	_set_git_verbose,
 )
 from .comment_targets import _find_krr_comment_targets
+from .crd_schema import CrdSchemaDetector, YamlDocLoc
+from .discovery_reports import build_discovery_report
+from .flate_discovery import DiscoveryBatch
 from .hr import _infer_namespace_from_path, _is_helmrelease, _resource_ref_from_doc
 from .krr import _aggregate_krr
 from .patching import _apply_to_resources_map, _cpu_qty, _mem_qty
@@ -56,6 +59,8 @@ def _parse_args() -> argparse.Namespace:
 	ap.add_argument("--repo-url", default=None, help=f"Git repo URL or owner/repo shorthand to clone if REPO isn't present (env: {_env_key('REPO_URL')})")
 	ap.add_argument("--flate-bin", default=None, help=f"Flate executable (env: {_env_key('FLATE_BIN')})")
 	ap.add_argument("--helm-bin", default=None, help=f"Helm executable used for chart values (env: {_env_key('HELM_BIN')})")
+	ap.add_argument("--kubectl-bin", default=None, help=f"Kubectl executable used for CRD schemas (env: {_env_key('KUBECTL_BIN')})")
+	ap.add_argument("--debug-discovery", action="store_true", default=None, help=f"Include bounded discovery diagnostics (env: {_env_key('DEBUG_DISCOVERY')})")
 	ap.add_argument("--git-base-url", default=None, help=f"Base URL for owner/repo shorthand (env: {_env_key('GIT_BASE_URL')}; falls back to FORGEJO_URL or https://github.com)")
 	ap.add_argument("--clone-depth", type=int, default=None, help=f"Optional git clone --depth N (env: {_env_key('CLONE_DEPTH')})")
 	ap.add_argument("--min-severity", default=None, help=f"Min severity: OK/GOOD/WARNING/CRITICAL (env: {_env_key('MIN_SEVERITY')})")
@@ -95,6 +100,8 @@ def _resolve_env_args(args: argparse.Namespace) -> argparse.Namespace:
 	args.repo_url = args.repo_url or _env_str("REPO_URL", "")
 	args.flate_bin = args.flate_bin or _env_str("FLATE_BIN", "flate")
 	args.helm_bin = args.helm_bin or _env_str("HELM_BIN", "helm")
+	args.kubectl_bin = args.kubectl_bin or _env_str("KUBECTL_BIN", "kubectl")
+	args.debug_discovery = args.debug_discovery if args.debug_discovery is not None else _env_bool("DEBUG_DISCOVERY", False)
 	args.git_base_url = args.git_base_url or _env_str("GIT_BASE_URL", "")
 	clone_depth_s = _env_str("CLONE_DEPTH", "")
 	args.clone_depth = args.clone_depth if args.clone_depth is not None else (int(clone_depth_s) if clone_depth_s.strip().isdigit() else None)
@@ -403,6 +410,27 @@ def _build_hr_index(
 	return hr_index, hr_index_by_name, comment_index
 
 
+def _collect_yaml_doc_locs(
+	repo_root: Path,
+	yaml_files: Sequence[Path],
+	*,
+	yaml_issues: Dict[str, List[str]],
+) -> List[YamlDocLoc]:
+	locations: List[YamlDocLoc] = []
+	for fp in yaml_files:
+		try:
+			with warnings.catch_warnings(record=True) as caught:
+				_, docs, _ = _read_all_yaml_docs(fp)
+			_record_yaml_warnings(repo_root, fp, "read", caught, yaml_issues)
+		except Exception as exc:
+			_record_yaml_error(repo_root, fp, "read", exc, yaml_issues)
+			continue
+		for index, doc in enumerate(docs):
+			if isinstance(doc, CommentedMap):
+				locations.append(YamlDocLoc(path=fp, doc_index=index, doc=doc))
+	return locations
+
+
 def _apply_krr_to_repo(
 	repo_root: Path,
 	rec_map: Dict[TargetKey, RecommendedResources],
@@ -417,6 +445,9 @@ def _apply_krr_to_repo(
 	yaml_issues: Dict[str, List[str]],
 	flate_bin: str = "flate",
 	helm_bin: str = "helm",
+	kubectl_bin: str = "kubectl",
+	debug_discovery: bool = False,
+	yaml_docs: Optional[Sequence[YamlDocLoc]] = None,
 ) -> Tuple[Dict[Path, YamlDocBundle], set[Path], int, List[str], Dict[str, List[str]]]:
 	changed_files: Dict[Path, YamlDocBundle] = {}
 	changed_paths: set[Path] = set()
@@ -448,6 +479,11 @@ def _apply_krr_to_repo(
 		no_name_fallback=no_name_fallback,
 		flate_bin=flate_bin,
 		helm_bin=helm_bin,
+	)
+	crd_report = (
+		CrdSchemaDetector(repo_root, kubectl_bin=kubectl_bin).detect(yaml_docs)
+		if yaml_docs is not None
+		else None
 	)
 	comment_matcher = CommentResourcesMatcher(comment_index=comment_index, repo_root=repo_root)
 
@@ -525,6 +561,16 @@ def _apply_krr_to_repo(
 		if target not in matched_targets
 	]
 
+	discovery_report = build_discovery_report(
+		helm_release_matcher.discovery_batch if isinstance(helm_release_matcher, HelmReleaseMatcher) else DiscoveryBatch(),
+		crd_report,
+		rec_map,
+		comment_index=comment_index,
+	)
+	report_summary = discovery_report.legacy_summary()
+	if debug_discovery:
+		report_summary["discovery_debug"] = [str(item) for item in discovery_report.debug]
+
 	return (
 		changed_files,
 		changed_paths,
@@ -538,6 +584,7 @@ def _apply_krr_to_repo(
 			"skipped_cli": skipped_cli,
 			"skipped_markdown": skipped_markdown,
 			"unmatched_markdown": unmatched_markdown,
+			**report_summary,
 		},
 	)
 
@@ -709,6 +756,10 @@ def _apply_to_target_matches(
 def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
 	updated = summary.get("updated_markdown") or summary.get("updated", [])
 	skipped = summary.get("skipped_markdown") or summary.get("skipped", [])
+	unambiguous = summary.get("unambiguous", [])
+	suggested = summary.get("suggested", [])
+	failed = summary.get("failed", [])
+	discovery_debug = summary.get("discovery_debug", [])
 	yaml_warnings = summary.get("yaml_warnings", [])
 	yaml_errors = summary.get("yaml_errors", [])
 	unmatched_items = list(summary.get("unmatched_markdown") or unmatched)
@@ -744,6 +795,9 @@ def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
 		f"- Updated targets: {len(updated)}",
 		f"- Skipped targets: {len(skipped)}",
 		f"- Unmatched targets: {len(unmatched_items)}",
+		f"- Unambiguous matches: {len(unambiguous)}",
+		f"- Suggested matches: {len(suggested)}",
+		f"- Failed matches: {len(failed)}",
 		"",
 	]
 	lines.extend(_collapse("Updated targets", updated))
@@ -752,6 +806,15 @@ def _format_pr_body(summary: Dict[str, List[str]], unmatched: List[str]) -> str:
 	lines.append("")
 	lines.extend(_collapse("Unmatched targets", unmatched_items))
 	lines.append("")
+	lines.extend(_collapse("Unambiguous matches", unambiguous))
+	lines.append("")
+	lines.extend(_collapse("Suggested matches", suggested))
+	lines.append("")
+	lines.extend(_collapse("Failed matches", failed))
+	lines.append("")
+	if discovery_debug:
+		lines.extend(_collapse("Discovery debug", discovery_debug))
+		lines.append("")
 	lines.extend(_collapse("YAML warnings", yaml_warnings))
 	lines.append("")
 	lines.extend(_collapse("YAML errors", yaml_errors))
@@ -784,6 +847,10 @@ def _format_cli_summary(
 ) -> str:
 	updated = summary.get("updated_cli") or summary.get("updated", [])
 	skipped = summary.get("skipped_cli") or summary.get("skipped", [])
+	unambiguous = summary.get("unambiguous", [])
+	suggested = summary.get("suggested", [])
+	failed = summary.get("failed", [])
+	discovery_debug = summary.get("discovery_debug", [])
 	unmatched_items = list(unmatched)
 	yaml_warnings = summary.get("yaml_warnings", [])
 	yaml_errors = summary.get("yaml_errors", [])
@@ -803,6 +870,9 @@ def _format_cli_summary(
 		f"- Updated targets: {len(updated)}",
 		f"- Skipped targets: {len(skipped)}",
 		f"- Unmatched targets: {len(unmatched_items)}",
+		f"- Unambiguous matches: {len(unambiguous)}",
+		f"- Suggested matches: {len(suggested)}",
+		f"- Failed matches: {len(failed)}",
 		"",
 	]
 	lines.extend(_section("Updated targets", updated))
@@ -811,6 +881,15 @@ def _format_cli_summary(
 	lines.append("")
 	lines.extend(_section("Unmatched targets", unmatched_items))
 	lines.append("")
+	lines.extend(_section("Unambiguous matches", unambiguous))
+	lines.append("")
+	lines.extend(_section("Suggested matches", suggested))
+	lines.append("")
+	lines.extend(_section("Failed matches", failed))
+	lines.append("")
+	if discovery_debug:
+		lines.extend(_section("Discovery debug", discovery_debug))
+		lines.append("")
 	lines.extend(_section("YAML warnings", yaml_warnings))
 	lines.append("")
 	lines.extend(_section("YAML errors", yaml_errors))
@@ -1109,6 +1188,7 @@ def main() -> int:
 					base_yaml_files,
 					yaml_issues=yaml_issues,
 				)
+				yaml_docs = _collect_yaml_doc_locs(base_root, base_yaml_files, yaml_issues=yaml_issues)
 
 				changed_files, changed_paths, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
 					base_root,
@@ -1123,6 +1203,9 @@ def main() -> int:
 					yaml_issues=yaml_issues,
 					flate_bin=getattr(args, "flate_bin", "flate"),
 					helm_bin=getattr(args, "helm_bin", "helm"),
+					kubectl_bin=getattr(args, "kubectl_bin", "kubectl"),
+					debug_discovery=getattr(args, "debug_discovery", False),
+					yaml_docs=yaml_docs,
 				)
 				summary["yaml_warnings"] = yaml_issues.get("warnings", [])
 				summary["yaml_errors"] = yaml_issues.get("errors", [])
@@ -1228,6 +1311,7 @@ def main() -> int:
 			yaml_files,
 			yaml_issues=yaml_issues,
 		)
+		yaml_docs = _collect_yaml_doc_locs(repo_root, yaml_files, yaml_issues=yaml_issues)
 
 		changed_files, changed_paths, total_changed_targets, unmatched, summary = _apply_krr_to_repo(
 			repo_root,
@@ -1242,6 +1326,9 @@ def main() -> int:
 			yaml_issues=yaml_issues,
 			flate_bin=getattr(args, "flate_bin", "flate"),
 			helm_bin=getattr(args, "helm_bin", "helm"),
+			kubectl_bin=getattr(args, "kubectl_bin", "kubectl"),
+			debug_discovery=getattr(args, "debug_discovery", False),
+			yaml_docs=yaml_docs,
 		)
 		summary["yaml_warnings"] = yaml_issues.get("warnings", [])
 		summary["yaml_errors"] = yaml_issues.get("errors", [])
