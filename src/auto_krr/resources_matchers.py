@@ -6,8 +6,8 @@ from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 from ruamel.yaml.comments import CommentedMap
 
-from .hr import _chart_name_from_hr
-from .patching import HELM_VALUES_CONFIGS, _resolve_helm_values_resources
+from .flate_discovery import FlateDiscovery
+from .patching import _resolve_resources_path
 from .types import CommentTargetLoc, HrDocLoc, RecommendedResources, ResourceRef, TargetKey
 
 
@@ -61,25 +61,22 @@ class HelmReleaseMatcher:
 	def __init__(
 		self,
 		*,
+		repo_root: Path,
 		hr_index: Dict[ResourceRef, List[HrDocLoc]],
 		hr_index_by_name: Dict[str, List[HrDocLoc]],
 		no_name_fallback: bool,
+		discovery: Optional[FlateDiscovery] = None,
+		flate_bin: str = "flate",
+		helm_bin: str = "helm",
 	) -> None:
+		self._repo_root = repo_root
 		self._hr_index = hr_index
 		self._hr_index_by_name = hr_index_by_name
 		self._no_name_fallback = no_name_fallback
-		self._configs = HELM_VALUES_CONFIGS
-		self._target_counts_by_resource: Dict[ResourceRef, int] = {}
+		self._discovery = discovery or FlateDiscovery(repo_root, flate_bin=flate_bin, helm_bin=helm_bin)
+		self._discovery_results: Dict[Tuple[str, int], object] = {}
 
 	def iter_targets(self, rec_map: Dict[object, RecommendedResources]) -> Iterable[TargetMatch]:
-		self._target_counts_by_resource = {}
-		for target in rec_map.keys():
-			if not isinstance(target, TargetKey) or target.resource is None:
-				continue
-			if target.resource.kind != "HelmRelease":
-				continue
-			self._target_counts_by_resource[target.resource] = self._target_counts_by_resource.get(target.resource, 0) + 1
-
 		for target, rec in rec_map.items():
 			if not isinstance(target, TargetKey) or target.resource is None:
 				continue
@@ -147,30 +144,22 @@ class HelmReleaseMatcher:
 			raise ValueError("helmrelease matcher requires TargetKey with resource set")
 		if target.resource.kind != "HelmRelease":
 			raise ValueError("helmrelease matcher requires HelmRelease targets")
-		chart_name = _chart_name_from_hr(doc)
-		if chart_name:
-			config = self._configs.get(chart_name)
-			if config:
-				return _resolve_helm_values_resources(doc, target=target, create_missing=True, config=config)
-
-		# Heuristic matching for non-app-template HelmReleases.
-		count = self._target_counts_by_resource.get(target.resource, 0)
-		if count != 1:
-			return None, False, ["SKIP: heuristic requires a single workload for this HelmRelease"]
-
-		spec = doc.get("spec")
-		if not isinstance(spec, CommentedMap):
-			return None, False, ["SKIP: spec is not a mapping"]
-
-		values = spec.get("values")
-		if not isinstance(values, CommentedMap):
-			return None, False, ["SKIP: spec.values is not a mapping"]
-
-		resources = values.get("resources")
-		if not isinstance(resources, CommentedMap):
-			return None, False, ["SKIP: spec.values.resources is not a mapping"]
-
-		return resources, False, []
+		cache_key = (str(match.path.resolve()), match.doc_index)
+		result = self._discovery_results.get(cache_key)
+		if result is None:
+			result = self._discovery.discover(HrDocLoc(path=match.path, doc_index=match.doc_index, doc=doc))
+			self._discovery_results[cache_key] = result
+		path_for = getattr(result, "path_for")
+		resources_path = path_for(target.controller, target.container)
+		if resources_path is None:
+			notes = list(getattr(result, "notes", []))
+			if not notes:
+				notes.append(
+					f"SKIP: flate did not map workload/container {target.controller}/{target.container}"
+			)
+			return None, False, notes
+		resources, changed, path_notes = _resolve_resources_path(doc, resources_path, create_missing=True)
+		return resources, changed, list(getattr(result, "notes", [])) + path_notes
 
 
 class CommentResourcesMatcher:

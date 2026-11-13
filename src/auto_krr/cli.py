@@ -54,6 +54,8 @@ def _parse_args() -> argparse.Namespace:
 	ap.add_argument("--krr-json", type=Path, default=None, help=f"Path to krr.json (env: {_env_key('KRR_JSON')})")
 	ap.add_argument("--repo", type=Path, default=None, help=f"Path inside repo OR clone destination dir (env: {_env_key('REPO')})")
 	ap.add_argument("--repo-url", default=None, help=f"Git repo URL or owner/repo shorthand to clone if REPO isn't present (env: {_env_key('REPO_URL')})")
+	ap.add_argument("--flate-bin", default=None, help=f"Flate executable (env: {_env_key('FLATE_BIN')})")
+	ap.add_argument("--helm-bin", default=None, help=f"Helm executable used for chart values (env: {_env_key('HELM_BIN')})")
 	ap.add_argument("--git-base-url", default=None, help=f"Base URL for owner/repo shorthand (env: {_env_key('GIT_BASE_URL')}; falls back to FORGEJO_URL or https://github.com)")
 	ap.add_argument("--clone-depth", type=int, default=None, help=f"Optional git clone --depth N (env: {_env_key('CLONE_DEPTH')})")
 	ap.add_argument("--min-severity", default=None, help=f"Min severity: OK/GOOD/WARNING/CRITICAL (env: {_env_key('MIN_SEVERITY')})")
@@ -91,6 +93,8 @@ def _resolve_env_args(args: argparse.Namespace) -> argparse.Namespace:
 	args.krr_json = args.krr_json or _env_path("KRR_JSON")
 	args.repo = args.repo or _env_path("REPO", Path("."))
 	args.repo_url = args.repo_url or _env_str("REPO_URL", "")
+	args.flate_bin = args.flate_bin or _env_str("FLATE_BIN", "flate")
+	args.helm_bin = args.helm_bin or _env_str("HELM_BIN", "helm")
 	args.git_base_url = args.git_base_url or _env_str("GIT_BASE_URL", "")
 	clone_depth_s = _env_str("CLONE_DEPTH", "")
 	args.clone_depth = args.clone_depth if args.clone_depth is not None else (int(clone_depth_s) if clone_depth_s.strip().isdigit() else None)
@@ -411,6 +415,8 @@ def _apply_krr_to_repo(
 	no_name_fallback: bool,
 	cli_format: str = "compact",
 	yaml_issues: Dict[str, List[str]],
+	flate_bin: str = "flate",
+	helm_bin: str = "helm",
 ) -> Tuple[Dict[Path, YamlDocBundle], set[Path], int, List[str], Dict[str, List[str]]]:
 	changed_files: Dict[Path, YamlDocBundle] = {}
 	changed_paths: set[Path] = set()
@@ -436,9 +442,12 @@ def _apply_krr_to_repo(
 		return raw, docs, yaml
 
 	helm_release_matcher: ResourcesMatcher = HelmReleaseMatcher(
+		repo_root=repo_root,
 		hr_index=hr_index,
 		hr_index_by_name=hr_index_by_name,
 		no_name_fallback=no_name_fallback,
+		flate_bin=flate_bin,
+		helm_bin=helm_bin,
 	)
 	comment_matcher = CommentResourcesMatcher(comment_index=comment_index, repo_root=repo_root)
 
@@ -1112,6 +1121,8 @@ def main() -> int:
 					no_name_fallback=args.no_name_fallback,
 					cli_format=cli_format,
 					yaml_issues=yaml_issues,
+					flate_bin=getattr(args, "flate_bin", "flate"),
+					helm_bin=getattr(args, "helm_bin", "helm"),
 				)
 				summary["yaml_warnings"] = yaml_issues.get("warnings", [])
 				summary["yaml_errors"] = yaml_issues.get("errors", [])
@@ -1229,6 +1240,8 @@ def main() -> int:
 			no_name_fallback=args.no_name_fallback,
 			cli_format=cli_format,
 			yaml_issues=yaml_issues,
+			flate_bin=getattr(args, "flate_bin", "flate"),
+			helm_bin=getattr(args, "helm_bin", "helm"),
 		)
 		summary["yaml_warnings"] = yaml_issues.get("warnings", [])
 		summary["yaml_errors"] = yaml_issues.get("errors", [])
