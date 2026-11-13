@@ -141,6 +141,68 @@ spec:
 	assert ref.version == "1.2.3"
 
 
+def test_resolve_chart_ref_uses_release_namespace_when_source_namespace_omitted(tmp_path: Path) -> None:
+	(tmp_path / "sources.yaml").write_text(
+		"""\
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: chart
+spec:
+  url: oci://example.test/chart
+  ref:
+    tag: 1.0.0
+""",
+		encoding="utf-8",
+	)
+	doc = _load_doc(
+		"""\
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: demo
+  namespace: media
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: chart
+"""
+	)
+
+	ref = _resolve_chart_ref(tmp_path, doc)
+
+	assert ref is not None
+	assert ref.source_namespace == "media"
+
+
+def test_resolve_inline_oci_chart_template_without_source_ref(tmp_path: Path) -> None:
+	doc = _load_doc(
+		"""\
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: demo
+  namespace: media
+spec:
+  chart:
+    spec:
+      kind: OCIRepository
+      url: oci://example.test/demo
+      ref:
+        tag: 2.3.4
+"""
+	)
+
+	ref = _resolve_chart_ref(tmp_path, doc)
+
+	assert ref is not None
+	assert ref.source_kind == "OCIRepository"
+	assert ref.chart == "oci://example.test/demo"
+	assert ref.source_url == "oci://example.test/demo"
+	assert ref.version == "2.3.4"
+	assert ref.source_namespace == "media"
+
+
 def test_load_chart_values_uses_helm_and_reads_schema(tmp_path: Path) -> None:
 	bin_path = tmp_path / "fake-helm"
 	_write_executable(

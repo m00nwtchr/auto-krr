@@ -5,7 +5,7 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 import auto_krr.flate_discovery as flate_discovery
-from auto_krr.flate_discovery import FlateDiscovery
+from auto_krr.flate_discovery import FlateDiscovery, _chart_source_doc
 from auto_krr.helm_values import ChartCandidate, ChartRef, ChartValues
 from auto_krr.types import HrDocLoc
 from auto_krr.yaml_utils import _read_all_yaml_docs
@@ -208,3 +208,33 @@ spec:
 
 	assert result.path_for("demo", "app") is None
 	assert any("no resource sentinel" in note for note in result.notes)
+
+
+def test_chart_source_supply_uses_effective_release_namespace() -> None:
+	doc = YAML(typ="rt").load(
+		"""\
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: demo
+  namespace: media
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: chart
+"""
+	)
+	assert isinstance(doc, CommentedMap)
+	chart_ref = ChartRef(
+		chart="oci://example.test/chart",
+		version="1.0.0",
+		source_kind="OCIRepository",
+		source_url="oci://example.test/chart",
+		source_name="chart",
+		source_namespace="media",
+	)
+
+	source = _chart_source_doc(doc, chart_ref)
+
+	assert source["metadata"]["name"] == "chart"
+	assert source["metadata"]["namespace"] == "media"

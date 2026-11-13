@@ -176,17 +176,19 @@ def _release_values(doc: CommentedMap) -> CommentedMap:
 
 def _chart_source_doc(hr_doc: CommentedMap, chart_ref: ChartRef) -> CommentedMap:
 	spec = hr_doc.get("spec") or {}
+	metadata = hr_doc.get("metadata") or {}
+	effective_namespace = str(metadata.get("namespace") or "default") if isinstance(metadata, Mapping) else "default"
 	chart_reference = spec.get("chartRef") if isinstance(spec, Mapping) else None
 	if isinstance(chart_reference, Mapping):
 		kind = str(chart_reference.get("kind") or chart_ref.source_kind)
-		name = str(chart_reference.get("name") or Path(chart_ref.chart).name)
-		namespace = str(chart_reference.get("namespace") or "flux-system")
+		name = str(chart_reference.get("name") or chart_ref.source_name or Path(chart_ref.chart).name)
+		namespace = str(chart_reference.get("namespace") or chart_ref.source_namespace or effective_namespace)
 	else:
 		chart_spec = spec.get("chart", {}).get("spec", {}) if isinstance(spec, Mapping) else {}
 		source_reference = chart_spec.get("sourceRef", {}) if isinstance(chart_spec, Mapping) else {}
 		kind = str(source_reference.get("kind") or chart_ref.source_kind)
-		name = str(source_reference.get("name") or Path(chart_ref.chart).name)
-		namespace = str(source_reference.get("namespace") or "default")
+		name = str(source_reference.get("name") or chart_ref.source_name or Path(chart_ref.chart).name)
+		namespace = str(source_reference.get("namespace") or chart_ref.source_namespace or effective_namespace)
 
 	source_spec: CommentedMap = CommentedMap(
 		{

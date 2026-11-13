@@ -19,6 +19,8 @@ class ChartRef:
 	version: Optional[str]
 	source_kind: str
 	source_url: Optional[str] = None
+	source_name: Optional[str] = None
+	source_namespace: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -45,7 +47,13 @@ def _resolve_chart_ref(repo_root: Path, hr_doc: CommentedMap) -> Optional[ChartR
 		source = _find_source(repo_root, kind=kind, name=name, namespace=namespace)
 		if source is None:
 			return None
-		return _chart_ref_from_source(chart_ref, source, kind=kind)
+		return _chart_ref_from_source(
+			chart_ref,
+			source,
+			kind=kind,
+			source_name=name,
+			source_namespace=namespace,
+		)
 
 	chart = spec.get("chart")
 	if not isinstance(chart, Mapping):
@@ -54,6 +62,18 @@ def _resolve_chart_ref(repo_root: Path, hr_doc: CommentedMap) -> Optional[ChartR
 	if not isinstance(chart_spec, Mapping):
 		return None
 	source_ref = chart_spec.get("sourceRef")
+	if not isinstance(source_ref, Mapping) and str(chart_spec.get("kind") or "") == "OCIRepository":
+		url = str(chart_spec.get("url") or "")
+		if not url:
+			return None
+		return ChartRef(
+			chart=url,
+			version=_version_from_ref(chart_spec.get("ref")),
+			source_kind="OCIRepository",
+			source_url=url,
+			source_name=_source_name_from_url(url),
+			source_namespace=_metadata_namespace(hr_doc),
+		)
 	if not isinstance(source_ref, Mapping):
 		return None
 	kind = str(source_ref.get("kind") or "HelmRepository")
@@ -69,6 +89,8 @@ def _resolve_chart_ref(repo_root: Path, hr_doc: CommentedMap) -> Optional[ChartR
 		},
 		source,
 		kind=kind,
+		source_name=name,
+		source_namespace=namespace,
 	)
 
 
@@ -111,7 +133,14 @@ def _yaml_files(repo_root: Path) -> Iterable[Path]:
 			yield path
 
 
-def _chart_ref_from_source(chart_ref: Mapping[str, Any], source: Mapping[str, Any], *, kind: str) -> Optional[ChartRef]:
+def _chart_ref_from_source(
+	chart_ref: Mapping[str, Any],
+	source: Mapping[str, Any],
+	*,
+	kind: str,
+	source_name: str,
+	source_namespace: str,
+) -> Optional[ChartRef]:
 	spec = source.get("spec")
 	if not isinstance(spec, Mapping):
 		return None
@@ -124,7 +153,14 @@ def _chart_ref_from_source(chart_ref: Mapping[str, Any], source: Mapping[str, An
 		version = chart_ref.get("version")
 		if not version and isinstance(ref, Mapping):
 			version = ref.get("tag") or ref.get("semver") or ref.get("digest")
-		return ChartRef(chart=url, version=str(version) if version else None, source_kind=kind, source_url=url)
+		return ChartRef(
+			chart=url,
+			version=str(version) if version else None,
+			source_kind=kind,
+			source_url=url,
+			source_name=source_name,
+			source_namespace=source_namespace,
+		)
 
 	if kind == "HelmRepository":
 		chart = chart_ref.get("chart")
@@ -137,9 +173,23 @@ def _chart_ref_from_source(chart_ref: Mapping[str, Any], source: Mapping[str, An
 			version=str(version) if version else None,
 			source_kind=kind,
 			source_url=url,
+			source_name=source_name,
+			source_namespace=source_namespace,
 		)
 
 	return None
+
+
+def _version_from_ref(ref: object) -> Optional[str]:
+	if not isinstance(ref, Mapping):
+		return None
+	version = ref.get("tag") or ref.get("semver") or ref.get("digest")
+	return str(version) if version else None
+
+
+def _source_name_from_url(url: str) -> str:
+	name = url.rstrip("/").rsplit("/", 1)[-1]
+	return name or "auto-krr-chart"
 
 
 def _load_chart_values(chart_ref: ChartRef, helm_bin: str, cache_dir: Path) -> ChartValues:
