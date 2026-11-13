@@ -1,5 +1,6 @@
 import io
 import urllib.error
+import urllib.parse
 import urllib.request
 
 import pytest
@@ -88,7 +89,13 @@ def test_forgejo_find_open_pr_matches_head(monkeypatch) -> None:
 			"html_url": "https://pr/2",
 		}
 	]
-	monkeypatch.setattr("auto_krr.forgejo._http_json", lambda *a, **k: prs)
+	requested_url = {"value": ""}
+
+	def _fake_http_json(_method, url, **_kwargs):
+		requested_url["value"] = url
+		return prs
+
+	monkeypatch.setattr("auto_krr.forgejo._http_json", _fake_http_json)
 	out = _forgejo_find_open_pr(
 		repo,
 		token="t",
@@ -98,4 +105,6 @@ def test_forgejo_find_open_pr_matches_head(monkeypatch) -> None:
 		insecure_tls=False,
 		expected_authors={"me"},
 	)
+	query = urllib.parse.parse_qs(urllib.parse.urlparse(requested_url["value"]).query)
+	assert query["head"] == ["feature"]
 	assert out == "https://pr/2"
