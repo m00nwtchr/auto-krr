@@ -80,6 +80,7 @@ def _metadata_namespace(doc: Mapping[str, Any]) -> str:
 
 
 def _find_source(repo_root: Path, *, kind: str, name: str, namespace: str) -> Optional[CommentedMap]:
+	unnamespaced: Optional[CommentedMap] = None
 	for path in _yaml_files(repo_root):
 		try:
 			_, docs, _ = _read_all_yaml_docs(path)
@@ -91,10 +92,15 @@ def _find_source(repo_root: Path, *, kind: str, name: str, namespace: str) -> Op
 			metadata = doc.get("metadata")
 			if not isinstance(metadata, Mapping) or str(metadata.get("name") or "") != name:
 				continue
-			if str(metadata.get("namespace") or "default") != namespace:
+			source_namespace = metadata.get("namespace")
+			if source_namespace is None:
+				if unnamespaced is None:
+					unnamespaced = doc
+				continue
+			if str(source_namespace) != namespace:
 				continue
 			return doc
-	return None
+	return unnamespaced
 
 
 def _yaml_files(repo_root: Path) -> Iterable[Path]:

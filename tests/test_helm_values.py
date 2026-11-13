@@ -32,7 +32,6 @@ apiVersion: source.toolkit.fluxcd.io/v1
 kind: OCIRepository
 metadata:
   name: app-template
-  namespace: flux-system
 spec:
   url: oci://ghcr.io/example/app-template
   ref:

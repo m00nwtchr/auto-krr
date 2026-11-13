@@ -12,11 +12,13 @@ from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from .helm_values import (
+	ChartRef,
 	ChartCandidate,
 	_enumerate_resource_candidates,
 	_load_chart_values,
 	_resolve_chart_ref,
 )
+from .hr import _infer_namespace_from_path
 from .types import HrDocLoc
 from .yaml_utils import _dump_all_yaml_docs, _read_all_yaml_docs
 
@@ -72,7 +74,7 @@ class FlateDiscovery:
 
 		sentinels = [_make_sentinel(candidate, index) for index, candidate in enumerate(candidates, start=1)]
 		try:
-			rendered = self._render_probe(hr_loc, sentinels)
+			rendered = self._render_probe(hr_loc, chart_ref, sentinels)
 		except Exception as exc:
 			result.notes.append(f"SKIP: flate render failed: {exc}")
 			return result
@@ -95,14 +97,14 @@ class FlateDiscovery:
 			result.notes.append("SKIP: flate rendered no resource sentinel for a workload container")
 		return result
 
-	def _render_probe(self, hr_loc: HrDocLoc, sentinels: List[_Sentinel]) -> List[object]:
+	def _render_probe(self, hr_loc: HrDocLoc, chart_ref: ChartRef, sentinels: List[_Sentinel]) -> List[object]:
 		with tempfile.TemporaryDirectory(prefix="probe-", dir=self._cache_temp.name) as temp_name:
 			probe_root = Path(temp_name)
 			shutil.copytree(
 				self._repo_root,
 				probe_root,
 				dirs_exist_ok=True,
-				ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__"),
+				ignore=shutil.ignore_patterns(".venv", "__pycache__"),
 			)
 			relative_path = hr_loc.path.resolve().relative_to(self._repo_root.resolve())
 			probe_file = probe_root / relative_path
@@ -119,8 +121,14 @@ class FlateDiscovery:
 
 			metadata = hr_loc.doc.get("metadata") or {}
 			name = str(metadata.get("name") or "")
-			namespace = str(metadata.get("namespace") or "default")
-			render_path = "kubernetes" if (probe_root / "kubernetes").is_dir() else "."
+			namespace = str(
+				metadata.get("namespace")
+				or _infer_namespace_from_path(self._repo_root, hr_loc.path)
+				or "default"
+			)
+			render_path = str(relative_path.parent) or "."
+			supply_file = probe_root / ".auto-krr-chart-source.yaml"
+			supply_file.write_text(_dump_supply_yaml(_chart_source_doc(hr_loc.doc, chart_ref)), encoding="utf-8")
 			cmd = [
 				self._flate_bin,
 				"build",
@@ -130,6 +138,8 @@ class FlateDiscovery:
 				namespace,
 				"-p",
 				render_path,
+				"--supply",
+				str(supply_file),
 				"--allow-missing-kinds",
 				"Secret,ConfigMap",
 				"--no-progress",
@@ -162,6 +172,47 @@ def _release_values(doc: CommentedMap) -> CommentedMap:
 	if isinstance(spec, Mapping) and isinstance(spec.get("values"), CommentedMap):
 		return spec["values"]
 	return CommentedMap()
+
+
+def _chart_source_doc(hr_doc: CommentedMap, chart_ref: ChartRef) -> CommentedMap:
+	spec = hr_doc.get("spec") or {}
+	chart_reference = spec.get("chartRef") if isinstance(spec, Mapping) else None
+	if isinstance(chart_reference, Mapping):
+		kind = str(chart_reference.get("kind") or chart_ref.source_kind)
+		name = str(chart_reference.get("name") or Path(chart_ref.chart).name)
+		namespace = str(chart_reference.get("namespace") or "flux-system")
+	else:
+		chart_spec = spec.get("chart", {}).get("spec", {}) if isinstance(spec, Mapping) else {}
+		source_reference = chart_spec.get("sourceRef", {}) if isinstance(chart_spec, Mapping) else {}
+		kind = str(source_reference.get("kind") or chart_ref.source_kind)
+		name = str(source_reference.get("name") or Path(chart_ref.chart).name)
+		namespace = str(source_reference.get("namespace") or "default")
+
+	source_spec: CommentedMap = CommentedMap(
+		{
+			"interval": "5m",
+			"url": chart_ref.source_url or chart_ref.chart,
+		}
+	)
+	if kind == "OCIRepository" and chart_ref.version:
+		ref_key = "digest" if chart_ref.version.startswith("sha256:") else "tag"
+		source_spec["ref"] = CommentedMap({ref_key: chart_ref.version})
+	return CommentedMap(
+		{
+			"apiVersion": "source.toolkit.fluxcd.io/v1",
+			"kind": kind,
+			"metadata": CommentedMap({"name": name, "namespace": namespace}),
+			"spec": source_spec,
+		}
+	)
+
+
+def _dump_supply_yaml(doc: CommentedMap) -> str:
+	yaml = YAML()
+	yaml.explicit_start = True
+	buf = StringIO()
+	yaml.dump(doc, buf)
+	return buf.getvalue()
 
 
 def _make_sentinel(candidate: ChartCandidate, index: int) -> _Sentinel:

@@ -38,10 +38,15 @@ For each HelmRelease that has KRR targets:
    all candidate sentinels into a temporary copy of the HelmRelease in one
    probe document. This allows one flate render per HelmRelease rather than one
    render per candidate.
-5. Run `flate build hr <name> -n <namespace> -p kubernetes --output yaml`,
-   allowing the same missing Secret/ConfigMap kinds as the existing manual
-   validation command. Parse rendered workload Pod templates and inspect all
-   regular and init containers.
+5. Run flate against a temporary copy that retains Git metadata (flate uses
+   the repository index when selecting manifests). Restrict `--path` to the
+   HelmRelease's containing directory and supply a temporary, namespaced chart
+   source object so unrelated HelmRelease failures do not block discovery.
+   Infer a missing HelmRelease namespace from the repository path using the
+   same convention as the matcher. The command allows the same missing
+   Secret/ConfigMap kinds as the existing manual validation command. Parse
+   rendered workload Pod templates and inspect all regular and init
+   containers.
 6. For each rendered `(workload metadata.name, container.name)`, record the
    candidate path whose sentinel appears in the container's resources. A
    single path is a valid mapping. Zero paths is unmatched. Multiple paths are
