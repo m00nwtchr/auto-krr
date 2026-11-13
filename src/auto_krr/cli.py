@@ -39,6 +39,7 @@ from .git_utils import (
 	_set_git_verbose,
 )
 from .comment_targets import _find_krr_comment_targets
+from .comment_validation import render_comment_finding, validate_comments
 from .crd_schema import CrdSchemaDetector, YamlDocLoc
 from .discovery_reports import build_discovery_report
 from .flate_discovery import DiscoveryBatch
@@ -61,6 +62,7 @@ def _parse_args() -> argparse.Namespace:
 	ap.add_argument("--helm-bin", default=None, help=f"Helm executable used for chart values (env: {_env_key('HELM_BIN')})")
 	ap.add_argument("--kubectl-bin", default=None, help=f"Kubectl executable used for CRD schemas (env: {_env_key('KUBECTL_BIN')})")
 	ap.add_argument("--debug-discovery", action="store_true", default=None, help=f"Include bounded discovery diagnostics (env: {_env_key('DEBUG_DISCOVERY')})")
+	ap.add_argument("--check-comments", action="store_true", default=None, help=f"Validate existing KRR comments without editing them (env: {_env_key('CHECK_COMMENTS')})")
 	ap.add_argument("--git-base-url", default=None, help=f"Base URL for owner/repo shorthand (env: {_env_key('GIT_BASE_URL')}; falls back to FORGEJO_URL or https://github.com)")
 	ap.add_argument("--clone-depth", type=int, default=None, help=f"Optional git clone --depth N (env: {_env_key('CLONE_DEPTH')})")
 	ap.add_argument("--min-severity", default=None, help=f"Min severity: OK/GOOD/WARNING/CRITICAL (env: {_env_key('MIN_SEVERITY')})")
@@ -102,6 +104,7 @@ def _resolve_env_args(args: argparse.Namespace) -> argparse.Namespace:
 	args.helm_bin = args.helm_bin or _env_str("HELM_BIN", "helm")
 	args.kubectl_bin = args.kubectl_bin or _env_str("KUBECTL_BIN", "kubectl")
 	args.debug_discovery = args.debug_discovery if args.debug_discovery is not None else _env_bool("DEBUG_DISCOVERY", False)
+	args.check_comments = args.check_comments if args.check_comments is not None else _env_bool("CHECK_COMMENTS", False)
 	args.git_base_url = args.git_base_url or _env_str("GIT_BASE_URL", "")
 	clone_depth_s = _env_str("CLONE_DEPTH", "")
 	args.clone_depth = args.clone_depth if args.clone_depth is not None else (int(clone_depth_s) if clone_depth_s.strip().isdigit() else None)
@@ -448,6 +451,7 @@ def _apply_krr_to_repo(
 	kubectl_bin: str = "kubectl",
 	debug_discovery: bool = False,
 	yaml_docs: Optional[Sequence[YamlDocLoc]] = None,
+	check_comments: bool = False,
 ) -> Tuple[Dict[Path, YamlDocBundle], set[Path], int, List[str], Dict[str, List[str]]]:
 	changed_files: Dict[Path, YamlDocBundle] = {}
 	changed_paths: set[Path] = set()
@@ -570,6 +574,15 @@ def _apply_krr_to_repo(
 	report_summary = discovery_report.legacy_summary()
 	if debug_discovery:
 		report_summary["discovery_debug"] = [str(item) for item in discovery_report.debug]
+	if check_comments:
+		comment_findings = validate_comments(
+			comment_index,
+			helm_release_matcher.discovery_batch if isinstance(helm_release_matcher, HelmReleaseMatcher) else DiscoveryBatch(),
+			include_non_krr_targets=True,
+		)
+		for finding in comment_findings:
+			key = "failed" if finding.classification == "unvalidated" else "suggested"
+			report_summary[key].append(render_comment_finding(finding))
 
 	return (
 		changed_files,
@@ -1205,6 +1218,7 @@ def main() -> int:
 					helm_bin=getattr(args, "helm_bin", "helm"),
 					kubectl_bin=getattr(args, "kubectl_bin", "kubectl"),
 					debug_discovery=getattr(args, "debug_discovery", False),
+					check_comments=getattr(args, "check_comments", False),
 					yaml_docs=yaml_docs,
 				)
 				summary["yaml_warnings"] = yaml_issues.get("warnings", [])
@@ -1328,6 +1342,7 @@ def main() -> int:
 			helm_bin=getattr(args, "helm_bin", "helm"),
 			kubectl_bin=getattr(args, "kubectl_bin", "kubectl"),
 			debug_discovery=getattr(args, "debug_discovery", False),
+			check_comments=getattr(args, "check_comments", False),
 			yaml_docs=yaml_docs,
 		)
 		summary["yaml_warnings"] = yaml_issues.get("warnings", [])

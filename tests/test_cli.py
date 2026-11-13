@@ -143,6 +143,15 @@ def test_cli_resolves_crd_discovery_configuration_from_environment(monkeypatch) 
 	assert args.debug_discovery is True
 
 
+def test_cli_resolves_comment_checking_from_environment(monkeypatch) -> None:
+	monkeypatch.setenv("CHECK_COMMENTS", "1")
+	monkeypatch.setattr("sys.argv", ["auto-krr"])
+
+	args = _resolve_env_args(_parse_args())
+
+	assert args.check_comments is True
+
+
 def test_apply_krr_to_repo_uses_flate_discovered_path(tmp_path: Path, monkeypatch) -> None:
 	# Intended behavior: a generic discovered values path is matched and updated.
 	_install_fake_discovery(
@@ -358,6 +367,52 @@ spec:
 	assert total_changed == 1
 	assert unmatched == []
 	assert any("demo" in item for item in summary["updated"])
+
+
+def test_apply_krr_to_repo_check_comments_is_diagnostic_only(tmp_path: Path, monkeypatch) -> None:
+	path_value = ["spec", "values", "resources"]
+	_install_fake_discovery(monkeypatch, DiscoveryResult(paths={("demo", "app"): path_value}))
+	manifest = """\
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: demo
+  namespace: default
+spec:
+  chartRef:
+    kind: OCIRepository
+    name: custom-chart
+  values:
+    resources: # krr: controller=demo container=app
+      requests:
+        cpu: 10m
+"""
+	path = _write_yaml(tmp_path, "hr.yaml", manifest)
+	before = path.read_bytes()
+	hr_index, hr_index_by_name, comment_index = _build_hr_index(
+		tmp_path,
+		[path],
+		yaml_issues={"warnings": [], "errors": []},
+	)
+	target = TargetKey(resource=ResourceRef(kind="HelmRelease", namespace="default", name="demo"), controller="demo", container="app")
+
+	_, changed_paths, total_changed, _, summary = _apply_krr_to_repo(
+		tmp_path,
+		{target: RecommendedResources(req_cpu_cores=0.5)},
+		hints_map={},
+		hr_index=hr_index,
+		hr_index_by_name=hr_index_by_name,
+		comment_index=comment_index,
+		only_missing=False,
+		no_name_fallback=True,
+		yaml_issues={"warnings": [], "errors": []},
+		check_comments=True,
+	)
+
+	assert total_changed == 1
+	assert path in changed_paths
+	assert path.read_bytes() == before
+	assert any("unnecessary" in item for item in summary["suggested"])
 
 
 def test_apply_krr_to_repo_name_only_ambiguity(tmp_path: Path) -> None:
