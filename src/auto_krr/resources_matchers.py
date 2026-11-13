@@ -6,7 +6,7 @@ from typing import Dict, Iterable, List, Optional, Protocol, Tuple
 
 from ruamel.yaml.comments import CommentedMap
 
-from .flate_discovery import FlateDiscovery
+from .flate_discovery import DiscoveryBatch, FlateDiscovery, _release_identity
 from .patching import _resolve_resources_path
 from .types import CommentTargetLoc, HrDocLoc, RecommendedResources, ResourceRef, TargetKey
 
@@ -66,6 +66,7 @@ class HelmReleaseMatcher:
 		hr_index_by_name: Dict[str, List[HrDocLoc]],
 		no_name_fallback: bool,
 		discovery: Optional[FlateDiscovery] = None,
+		discovery_batch: Optional[DiscoveryBatch] = None,
 		flate_bin: str = "flate",
 		helm_bin: str = "helm",
 	) -> None:
@@ -74,7 +75,25 @@ class HelmReleaseMatcher:
 		self._hr_index_by_name = hr_index_by_name
 		self._no_name_fallback = no_name_fallback
 		self._discovery = discovery or FlateDiscovery(repo_root, flate_bin=flate_bin, helm_bin=helm_bin)
-		self._discovery_results: Dict[Tuple[str, int], object] = {}
+		self._discovery_batch = discovery_batch if discovery_batch is not None else self._discover_batch()
+
+	def _discover_batch(self) -> DiscoveryBatch:
+		locs: Dict[Tuple[str, int], HrDocLoc] = {}
+		for candidates in self._hr_index.values():
+			for loc in candidates:
+				locs[(str(loc.path.resolve()), loc.doc_index)] = loc
+		for candidates in self._hr_index_by_name.values():
+			for loc in candidates:
+				locs[(str(loc.path.resolve()), loc.doc_index)] = loc
+
+		ordered_locs = list(locs.values())
+		if hasattr(self._discovery, "discover_many"):
+			return self._discovery.discover_many(ordered_locs)
+
+		results = {}
+		for loc in ordered_locs:
+			results[_release_identity(self._repo_root, loc)] = self._discovery.discover(loc)
+		return DiscoveryBatch(results=results, render_invocations=1 if ordered_locs else 0)
 
 	def iter_targets(self, rec_map: Dict[object, RecommendedResources]) -> Iterable[TargetMatch]:
 		for target, rec in rec_map.items():
@@ -144,13 +163,17 @@ class HelmReleaseMatcher:
 			raise ValueError("helmrelease matcher requires TargetKey with resource set")
 		if target.resource.kind != "HelmRelease":
 			raise ValueError("helmrelease matcher requires HelmRelease targets")
-		cache_key = (str(match.path.resolve()), match.doc_index)
-		result = self._discovery_results.get(cache_key)
+		loc = HrDocLoc(path=match.path, doc_index=match.doc_index, doc=doc)
+		identity = _release_identity(self._repo_root, loc)
+		result = self._discovery_batch.results.get(identity)
 		if result is None:
-			result = self._discovery.discover(HrDocLoc(path=match.path, doc_index=match.doc_index, doc=doc))
-			self._discovery_results[cache_key] = result
+			notes = [f"SKIP: flate discovery has no result for {identity.namespace}/{identity.name}"]
+			return None, False, notes
 		path_for = getattr(result, "path_for")
-		resources_path = path_for(target.controller, target.container)
+		try:
+			resources_path = path_for(identity, target.controller, target.container)
+		except TypeError:
+			resources_path = path_for(target.controller, target.container)
 		if resources_path is None:
 			notes = list(getattr(result, "notes", []))
 			if not notes:

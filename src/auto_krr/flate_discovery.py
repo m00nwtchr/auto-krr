@@ -1,43 +1,73 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from io import StringIO
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from .helm_values import (
-	ChartRef,
 	ChartCandidate,
+	ChartRef,
 	_enumerate_resource_candidates,
 	_load_chart_values,
 	_resolve_chart_ref,
 )
 from .hr import _infer_namespace_from_path
+from .sentinels import ProbeCandidate, SentinelValues, allocate_sentinels, sentinel_values
 from .types import HrDocLoc
 from .yaml_utils import _dump_all_yaml_docs, _read_all_yaml_docs
 
 
+@dataclass(frozen=True)
+class ReleaseIdentity:
+	namespace: str
+	name: str
+	manifest_path: Path
+	doc_index: int
+
+
 @dataclass
 class DiscoveryResult:
+	identity: Optional[ReleaseIdentity] = None
 	paths: Dict[Tuple[str, str], List[object]] = field(default_factory=dict)
 	ambiguous: Dict[Tuple[str, str], List[List[object]]] = field(default_factory=dict)
+	unmapped: List[List[object]] = field(default_factory=list)
+	failed: List[str] = field(default_factory=list)
 	notes: List[str] = field(default_factory=list)
 
-	def path_for(self, controller: str, container: str) -> Optional[List[object]]:
-		path = self.paths.get((controller, container))
+	def path_for(self, identity_or_controller, controller_or_container, container: Optional[str] = None) -> Optional[List[object]]:
+		if container is None:
+			key = (str(identity_or_controller), str(controller_or_container))
+		else:
+			key = (str(controller_or_container), str(container))
+		path = self.paths.get(key)
 		return list(path) if path is not None else None
 
 
+@dataclass
+class DiscoveryBatch:
+	results: Dict[ReleaseIdentity, DiscoveryResult] = field(default_factory=dict)
+	render_invocations: int = 0
+	command: Optional[List[str]] = None
+	notes: List[str] = field(default_factory=list)
+
+	def path_for(self, identity: ReleaseIdentity, controller: str, container: str) -> Optional[List[object]]:
+		result = self.results.get(identity)
+		return result.path_for(identity, controller, container) if result is not None else None
+
+
 @dataclass(frozen=True)
-class _Sentinel:
-	path: List[object]
-	values: Dict[str, str]
+class _CandidateBinding:
+	candidate: ProbeCandidate
+	result: DiscoveryResult
+	chart_ref: ChartRef
 
 
 class FlateDiscovery:
@@ -54,117 +84,257 @@ class FlateDiscovery:
 		cached = self._results.get(key)
 		if cached is not None:
 			return cached
-
-		result = DiscoveryResult()
+		batch = self.discover_many([hr_loc])
+		identity = _release_identity(self._repo_root, hr_loc)
+		result = batch.results[identity]
 		self._results[key] = result
-		chart_ref = _resolve_chart_ref(self._repo_root, hr_loc.doc)
-		if chart_ref is None:
-			result.notes.append("SKIP: HelmRelease chart reference could not be resolved")
-			return result
-		try:
-			chart_values = _load_chart_values(chart_ref, self._helm_bin, self._cache_dir)
-			release_values = _release_values(hr_loc.doc)
-			candidates = _enumerate_resource_candidates(chart_values, release_values)
-		except Exception as exc:
-			result.notes.append(f"SKIP: Helm chart values discovery failed: {exc}")
-			return result
-		if not candidates:
-			result.notes.append("SKIP: Helm chart has no resource value candidates")
-			return result
-
-		sentinels = [_make_sentinel(candidate, index) for index, candidate in enumerate(candidates, start=1)]
-		try:
-			rendered = self._render_probe(hr_loc, chart_ref, sentinels)
-		except Exception as exc:
-			result.notes.append(f"SKIP: flate render failed: {exc}")
-			return result
-
-		matched_any = False
-		for controller, container, resources in _rendered_containers(rendered):
-			observed = _resource_scalars(resources)
-			matched = [sentinel for sentinel in sentinels if observed.intersection(sentinel.values.values())]
-			if len(matched) == 1:
-				matched_any = True
-				result.paths[(controller, container)] = ["spec", "values", *matched[0].path]
-			elif len(matched) > 1:
-				key = (controller, container)
-				result.ambiguous[key] = [["spec", "values", *sentinel.path] for sentinel in matched]
-				result.notes.append(
-					f"SKIP: flate mapping is ambiguous for {controller}/{container} ({len(matched)} resource paths)"
-				)
-
-		if not matched_any and not result.ambiguous:
-			result.notes.append("SKIP: flate rendered no resource sentinel for a workload container")
 		return result
 
-	def _render_probe(self, hr_loc: HrDocLoc, chart_ref: ChartRef, sentinels: List[_Sentinel]) -> List[object]:
-		with tempfile.TemporaryDirectory(prefix="probe-", dir=self._cache_temp.name) as temp_name:
-			probe_root = Path(temp_name)
-			shutil.copytree(
-				self._repo_root,
-				probe_root,
-				dirs_exist_ok=True,
-				ignore=shutil.ignore_patterns(".venv", "__pycache__"),
-			)
-			relative_path = hr_loc.path.resolve().relative_to(self._repo_root.resolve())
-			probe_file = probe_root / relative_path
-			if not probe_file.is_file():
-				raise RuntimeError(f"probe manifest is missing: {relative_path}")
-			_, docs, yaml = _read_all_yaml_docs(probe_file)
-			if hr_loc.doc_index >= len(docs) or not isinstance(docs[hr_loc.doc_index], CommentedMap):
-				raise RuntimeError("probe HelmRelease document is missing")
-			probe_doc = docs[hr_loc.doc_index]
-			for sentinel in sentinels:
-				if not _set_mapping(probe_doc, ["spec", "values", *sentinel.path], _resource_map(sentinel.values)):
-					raise RuntimeError(f"probe path could not be created: {sentinel.path}")
-			probe_file.write_text(_dump_all_yaml_docs(yaml, docs), encoding="utf-8")
+	def discover_many(self, hr_locs: Sequence[HrDocLoc]) -> DiscoveryBatch:
+		batch = DiscoveryBatch()
+		if not hr_locs:
+			return batch
 
-			metadata = hr_loc.doc.get("metadata") or {}
-			name = str(metadata.get("name") or "")
-			namespace = str(
-				metadata.get("namespace")
-				or _infer_namespace_from_path(self._repo_root, hr_loc.path)
-				or "default"
-			)
-			render_path = str(relative_path.parent) or "."
-			supply_file = probe_root / ".auto-krr-chart-source.yaml"
-			supply_file.write_text(_dump_supply_yaml(_chart_source_doc(hr_loc.doc, chart_ref)), encoding="utf-8")
-			cmd = [
-				self._flate_bin,
-				"build",
-				"hr",
-				name,
-				"-n",
-				namespace,
-				"-p",
-				render_path,
-				"--supply",
-				str(supply_file),
-				"--allow-missing-kinds",
-				"Secret,ConfigMap",
-				"--no-progress",
-				"-o",
-				"yaml",
-			]
+		bindings: List[_CandidateBinding] = []
+		all_candidates: List[ProbeCandidate] = []
+		identity_by_key: Dict[Tuple[str, int], ReleaseIdentity] = {}
+		for hr_loc in hr_locs:
+			identity = _release_identity(self._repo_root, hr_loc)
+			result = DiscoveryResult(identity=identity)
+			batch.results[identity] = result
+			identity_by_key[(str(hr_loc.path.resolve()), hr_loc.doc_index)] = identity
 			try:
-				completed = subprocess.run(
-					cmd,
-					cwd=str(probe_root),
-					check=False,
+				chart_ref = _resolve_chart_ref(self._repo_root, hr_loc.doc)
+				if chart_ref is None:
+					raise RuntimeError("HelmRelease chart reference could not be resolved")
+				chart_values = _load_chart_values(chart_ref, self._helm_bin, self._cache_dir)
+				candidates = _enumerate_resource_candidates(chart_values, _release_values(hr_loc.doc))
+			except Exception as exc:
+				_note_failure(result, str(exc))
+				continue
+			if not candidates:
+				_note_failure(result, "Helm chart has no resource value candidates")
+				continue
+			for candidate in candidates:
+				probe_candidate = ProbeCandidate(
+					manifest_path=hr_loc.path.resolve().relative_to(self._repo_root.resolve()),
+					doc_index=hr_loc.doc_index,
+					namespace=identity.namespace,
+					release_name=identity.name,
+					value_path=tuple(candidate.path),
+				)
+				binding = _CandidateBinding(candidate=probe_candidate, result=result, chart_ref=chart_ref)
+				bindings.append(binding)
+				all_candidates.append(probe_candidate)
+
+		if not bindings:
+			return batch
+
+		occupied = _scalar_values(doc for hr_loc in hr_locs for doc in [hr_loc.doc])
+		allocated = allocate_sentinels(all_candidates, occupied)
+		try:
+			probe_root = self._make_probe_copy()
+			self._inject_probe_values(probe_root, bindings, allocated)
+			rendered, command, returncode, detail = self._render_repository(probe_root)
+			batch.render_invocations = 1
+			batch.command = command
+		except Exception as exc:
+			for result in batch.results.values():
+				_note_failure(result, str(exc))
+			return batch
+
+		matched_candidates: Set[ProbeCandidate] = set()
+		by_value: Dict[str, List[_CandidateBinding]] = {}
+		for binding in bindings:
+			for value in sentinel_values(allocated[binding.candidate]):
+				by_value.setdefault(value, []).append(binding)
+
+		for namespace, controller, container, resources in _rendered_containers(rendered):
+			observed = _resource_scalars(resources)
+			matched_bindings: List[_CandidateBinding] = []
+			seen_candidates: Set[ProbeCandidate] = set()
+			for value in observed:
+				for binding in by_value.get(value, []):
+					if binding.candidate not in seen_candidates:
+						seen_candidates.add(binding.candidate)
+						matched_bindings.append(binding)
+			if not matched_bindings:
+				continue
+
+			owners = {
+				binding.result.identity
+				for binding in matched_bindings
+				if binding.result.identity is not None
+			}
+			if len(owners) > 1:
+				options = [
+					["spec", "values", *binding.candidate.value_path]
+					for binding in matched_bindings
+				]
+				for binding in matched_bindings:
+					matched_candidates.add(binding.candidate)
+					key = (controller, container)
+					binding.result.ambiguous[key] = options
+					binding.result.notes.append(
+						f"SKIP: flate mapping is ambiguous for {controller}/{container} ({len(owners)} releases consumed sentinels)"
+					)
+				continue
+
+			if namespace:
+				matched_bindings = [
+					binding for binding in matched_bindings if binding.result.identity is None or binding.result.identity.namespace == namespace
+				]
+			if not matched_bindings:
+				continue
+
+			for binding in matched_bindings:
+				matched_candidates.add(binding.candidate)
+			if len(matched_bindings) != 1:
+				options = [
+					["spec", "values", *binding.candidate.value_path]
+					for binding in matched_bindings
+				]
+				for binding in matched_bindings:
+					key = (controller, container)
+					binding.result.ambiguous[key] = options
+					binding.result.notes.append(
+						f"SKIP: flate mapping is ambiguous for {controller}/{container} ({len(options)} resource paths)"
+					)
+				continue
+
+			binding = matched_bindings[0]
+			key = (controller, container)
+			path = ["spec", "values", *binding.candidate.value_path]
+			previous = binding.result.paths.get(key)
+			if previous is not None and previous != path:
+				binding.result.ambiguous[key] = [previous, path]
+				binding.result.paths.pop(key, None)
+				binding.result.notes.append(f"SKIP: flate mapping is ambiguous for {controller}/{container}")
+			else:
+				binding.result.paths[key] = path
+
+		for binding in bindings:
+			if binding.candidate not in matched_candidates:
+				path = ["spec", "values", *binding.candidate.value_path]
+				if path not in binding.result.unmapped:
+					binding.result.unmapped.append(path)
+				if not any("no resource sentinel" in note for note in binding.result.notes):
+					binding.result.notes.append(
+						f"SKIP: no resource sentinel matched candidate path {'/'.join(map(str, path))}"
+					)
+
+		if returncode != 0:
+			for result in batch.results.values():
+				if not result.paths and not result.ambiguous:
+					_note_failure(result, detail or f"flate exited with status {returncode}")
+		return batch
+
+	def _make_probe_copy(self) -> Path:
+		probe_root = Path(tempfile.mkdtemp(prefix="probe-", dir=self._cache_temp.name))
+		if (self._repo_root / ".git").exists():
+			shutil.rmtree(probe_root)
+			try:
+				subprocess.run(
+					["git", "clone", "--no-local", "--no-hardlinks", str(self._repo_root), str(probe_root)],
+					check=True,
 					stdout=subprocess.PIPE,
 					stderr=subprocess.PIPE,
 					text=True,
 				)
-			except OSError as exc:
-				raise RuntimeError(f"unable to execute flate: {exc}") from exc
+			except (OSError, subprocess.CalledProcessError) as exc:
+				raise RuntimeError(f"unable to create independent probe repository: {exc}") from exc
+		shutil.copytree(
+			self._repo_root,
+			probe_root,
+			dirs_exist_ok=True,
+			ignore=shutil.ignore_patterns(".git", ".venv", "__pycache__"),
+		)
+		return probe_root
+
+	def _inject_probe_values(
+		self,
+		probe_root: Path,
+		bindings: Sequence[_CandidateBinding],
+		allocated: Dict[ProbeCandidate, SentinelValues],
+	) -> None:
+		states: Dict[Path, Tuple[List[Any], YAML]] = {}
+		for binding in bindings:
+			relative_path = binding.candidate.manifest_path
+			if relative_path not in states:
+				probe_file = probe_root / relative_path
+				_, docs, yaml = _read_all_yaml_docs(probe_file)
+				states[relative_path] = (docs, yaml)
+			docs, _ = states[relative_path]
+			if binding.candidate.doc_index >= len(docs) or not isinstance(docs[binding.candidate.doc_index], CommentedMap):
+				raise RuntimeError(f"probe HelmRelease document is missing: {relative_path}")
+			if not _set_mapping(
+				docs[binding.candidate.doc_index],
+				["spec", "values", *binding.candidate.value_path],
+				_resource_map(allocated[binding.candidate]),
+			):
+				raise RuntimeError(f"probe path could not be created: {binding.candidate.value_path}")
+
+		for relative_path, (docs, yaml) in states.items():
+			(probe_root / relative_path).write_text(_dump_all_yaml_docs(yaml, docs), encoding="utf-8")
+
+	def _render_repository(self, probe_root: Path) -> Tuple[List[object], List[str], int, str]:
+		render_path = "kubernetes" if (probe_root / "kubernetes").is_dir() else "."
+		cmd = [
+			self._flate_bin,
+			"build",
+			"-p",
+			render_path,
+			"--allow-missing-kinds",
+			"Secret,ConfigMap",
+			"--no-progress",
+			"-o",
+			"yaml",
+		]
+		try:
+			completed = subprocess.run(
+				cmd,
+				cwd=str(probe_root),
+				check=False,
+				stdout=subprocess.PIPE,
+				stderr=subprocess.PIPE,
+				text=True,
+			)
+		except OSError as exc:
+			raise RuntimeError(f"unable to execute flate: {exc}") from exc
+		try:
+			yaml_safe = YAML(typ="safe")
+			rendered = list(yaml_safe.load_all(StringIO(completed.stdout))) if completed.stdout.strip() else []
+		except Exception as exc:
 			if completed.returncode != 0:
-				detail = (completed.stderr or completed.stdout or "").strip().splitlines()
-				raise RuntimeError(detail[-1] if detail else f"exit status {completed.returncode}")
-			try:
-				yaml_safe = YAML(typ="safe")
-				return list(yaml_safe.load_all(StringIO(completed.stdout)))
-			except Exception as exc:
-				raise RuntimeError(f"could not parse flate output: {exc}") from exc
+				raise RuntimeError(_bounded_detail(completed.stderr) or f"flate exited with status {completed.returncode}") from exc
+			raise RuntimeError(f"could not parse flate output: {exc}") from exc
+		return rendered, cmd, completed.returncode, _bounded_detail(completed.stderr)
+
+
+def _release_identity(repo_root: Path, hr_loc: HrDocLoc) -> ReleaseIdentity:
+	metadata = hr_loc.doc.get("metadata") or {}
+	name = str(metadata.get("name") or "") if isinstance(metadata, Mapping) else ""
+	namespace = str(metadata.get("namespace") or "") if isinstance(metadata, Mapping) else ""
+	if not namespace:
+		namespace = _infer_namespace_from_path(repo_root, hr_loc.path) or "default"
+	return ReleaseIdentity(
+		namespace=namespace,
+		name=name,
+		manifest_path=hr_loc.path.resolve().relative_to(repo_root.resolve()),
+		doc_index=hr_loc.doc_index,
+	)
+
+
+def _note_failure(result: DiscoveryResult, detail: str) -> None:
+	note = f"SKIP: flate discovery failed: {detail}"
+	result.failed.append(detail)
+	if note not in result.notes:
+		result.notes.append(note)
+
+
+def _bounded_detail(text: str) -> str:
+	lines = [line.strip() for line in text.splitlines() if line.strip()]
+	return " | ".join(lines[-3:])[:1000]
 
 
 def _release_values(doc: CommentedMap) -> CommentedMap:
@@ -190,12 +360,7 @@ def _chart_source_doc(hr_doc: CommentedMap, chart_ref: ChartRef) -> CommentedMap
 		name = str(source_reference.get("name") or chart_ref.source_name or Path(chart_ref.chart).name)
 		namespace = str(source_reference.get("namespace") or chart_ref.source_namespace or effective_namespace)
 
-	source_spec: CommentedMap = CommentedMap(
-		{
-			"interval": "5m",
-			"url": chart_ref.source_url or chart_ref.chart,
-		}
-	)
+	source_spec: CommentedMap = CommentedMap({"interval": "5m", "url": chart_ref.source_url or chart_ref.chart})
 	if kind == "OCIRepository" and chart_ref.version:
 		ref_key = "digest" if chart_ref.version.startswith("sha256:") else "tag"
 		source_spec["ref"] = CommentedMap({ref_key: chart_ref.version})
@@ -217,25 +382,10 @@ def _dump_supply_yaml(doc: CommentedMap) -> str:
 	return buf.getvalue()
 
 
-def _make_sentinel(candidate: ChartCandidate, index: int) -> _Sentinel:
-	return _Sentinel(
-		path=list(candidate.path),
-		values={
-			"requests.cpu": f"100000{index}m",
-			"requests.memory": f"200000{index}Mi",
-			"limits.cpu": f"300000{index}m",
-			"limits.memory": f"400000{index}Mi",
-		},
-	)
-
-
-def _resource_map(values: Dict[str, str]) -> CommentedMap:
+def _resource_map(values: SentinelValues) -> CommentedMap:
 	resources = CommentedMap()
-	for section in ("requests", "limits"):
-		part = CommentedMap()
-		for field in ("cpu", "memory"):
-			part[field] = values[f"{section}.{field}"]
-		resources[section] = part
+	resources["requests"] = CommentedMap({"cpu": values.requests_cpu, "memory": values.requests_memory})
+	resources["limits"] = CommentedMap({"cpu": values.limits_cpu, "memory": values.limits_memory})
 	return resources
 
 
@@ -273,9 +423,10 @@ def _rendered_containers(rendered: List[object]):
 		if not isinstance(doc, Mapping):
 			continue
 		metadata = doc.get("metadata")
-		controller = str(metadata.get("name") or "") if isinstance(metadata, Mapping) else ""
-		if not controller:
+		if not isinstance(metadata, Mapping) or not metadata.get("name"):
 			continue
+		namespace = str(metadata.get("namespace") or "")
+		controller = str(metadata["name"])
 		pod_spec = _pod_spec(doc)
 		if not isinstance(pod_spec, Mapping):
 			continue
@@ -288,7 +439,7 @@ def _rendered_containers(rendered: List[object]):
 					continue
 				resources = container.get("resources")
 				if isinstance(resources, Mapping):
-					yield controller, str(container["name"]), resources
+					yield namespace, controller, str(container["name"]), resources
 
 
 def _pod_spec(doc: Mapping[str, object]) -> Optional[Mapping[str, object]]:
@@ -313,10 +464,28 @@ def _pod_spec(doc: Mapping[str, object]) -> Optional[Mapping[str, object]]:
 	return template.get("spec") if isinstance(template.get("spec"), Mapping) else None
 
 
-def _resource_scalars(resources: Mapping[str, object]) -> set[str]:
-	values: set[str] = set()
+def _resource_scalars(resources: Mapping[str, object]) -> Set[str]:
+	values: Set[str] = set()
 	for section in ("requests", "limits"):
 		part = resources.get(section)
 		if isinstance(part, Mapping):
 			values.update(str(value) for value in part.values())
+	return values
+
+
+def _scalar_values(nodes: Sequence[object]) -> Set[str]:
+	values: Set[str] = set()
+
+	def visit(node: object) -> None:
+		if isinstance(node, Mapping):
+			for value in node.values():
+				visit(value)
+		elif isinstance(node, list):
+			for value in node:
+				visit(value)
+		elif node is not None:
+			values.add(str(node))
+
+	for node in nodes:
+		visit(node)
 	return values

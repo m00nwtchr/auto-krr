@@ -2,7 +2,7 @@ from pathlib import Path
 
 from ruamel.yaml.comments import CommentedMap
 
-from auto_krr.flate_discovery import DiscoveryResult
+from auto_krr.flate_discovery import DiscoveryBatch, DiscoveryResult, ReleaseIdentity
 from auto_krr.resources_matchers import HelmReleaseMatcher
 from auto_krr.types import HrDocLoc, RecommendedResources, ResourceRef, TargetKey
 
@@ -15,6 +15,20 @@ class _FakeDiscovery:
 	def discover(self, _loc: HrDocLoc) -> DiscoveryResult:
 		self.calls += 1
 		return self.result
+
+
+class _BatchOnlyDiscovery:
+	def __init__(self, batch: DiscoveryBatch) -> None:
+		self.batch = batch
+		self.batch_calls = 0
+
+	def discover_many(self, locs: list[HrDocLoc]) -> DiscoveryBatch:
+		self.batch_calls += 1
+		assert len(locs) == 1
+		return self.batch
+
+	def discover(self, _loc: HrDocLoc) -> DiscoveryResult:
+		raise AssertionError("individual discovery must not run during target resolution")
 
 
 def _doc() -> CommentedMap:
@@ -99,6 +113,30 @@ def test_helm_values_matcher_resolves_generic_discovered_path_and_caches() -> No
 	assert notes == []
 	assert second_notes == []
 	assert fake.calls == 1
+
+
+def test_helmrelease_matcher_precomputes_one_discovery_batch() -> None:
+	doc = _doc()
+	loc = HrDocLoc(path=Path("fake.yaml"), doc_index=0, doc=doc)
+	resource = ResourceRef(kind="HelmRelease", namespace="default", name="demo")
+	target = TargetKey(resource=resource, controller="demo", container="app")
+	identity = ReleaseIdentity("default", "demo", Path("fake.yaml"), 0)
+	result = DiscoveryResult(paths={("demo", "app"): ["spec", "values", "worker", "containers", "app", "resources"]})
+	fake = _BatchOnlyDiscovery(DiscoveryBatch(results={identity: result}))
+	matcher = HelmReleaseMatcher(
+		repo_root=Path("."),
+		discovery=fake,
+		hr_index={resource: [loc]},
+		hr_index_by_name={},
+		no_name_fallback=True,
+	)
+
+	resources, changed, notes = matcher.resolve_resources(doc, target, loc)
+
+	assert isinstance(resources, CommentedMap)
+	assert changed is True
+	assert notes == []
+	assert fake.batch_calls == 1
 
 
 def test_helmrelease_matcher_skips_ambiguous_discovery() -> None:
