@@ -84,7 +84,10 @@ Run discovery against commit `0ab865d` of
 validation must demonstrate mappings for ordinary app-template releases such
 as `media/kavita`, including the rendered `Deployment/kavita` container
 `app`, and must report unsupported or externally-missing releases as skips
-rather than applying heuristic patches.
+rather than applying heuristic patches. The original full-repository render
+reported failures for `wks`, `wordpress`, `gotosocial`, `continuwuity`, and
+`tor-operator`; isolated per-HelmRelease probing may resolve some of those
+independently, while remaining target-specific failures must still be skips.
 
 ## Testing strategy
 
